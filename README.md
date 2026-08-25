@@ -17,7 +17,7 @@ Follow these steps to configure your local Python environment to run the project
 **1. Install Utility Packages**
 We rely on the official DSEC-Detection package to handle the raw dataset files. Clone the repository and install it in editable mode:
 ```bash
-git clone https://github.com/uzh-rpg/DSEC.git
+git clone https://github.com/uzh-rpg/DSEC-det.git
 cd dsec-det/
 pip install -e .
 ```
