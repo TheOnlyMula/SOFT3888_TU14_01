@@ -46,3 +46,43 @@ You can run the script directly from your terminal to visualize the synchronized
 # Basic usage
 python dataset_loader.py --dataset-path "/path/to/your/dataset"
 ```
+
+## RGB Student DataLoader
+
+`train_rgb_student.py` configures the RGB-only student DataLoader for Issue #9.
+
+The dataset path must point to the DSEC root containing the `train` directory:
+
+```text
+DSEC_ROOT/
+└── train/
+    └── sequence_name/
+        ├── calibration/
+        ├── events/
+        ├── images/
+        └── object_detections/
+```
+
+Example:
+
+```bash
+python train_rgb_student.py --dataset-path "/path/to/DSEC_ROOT" --batch-size 4 --num-workers 4
+```
+
+The script:
+
+* Selects CUDA automatically when available, otherwise CPU.
+* Uses `DSECFusionDataset` with `split="train"` and `rgb_only=True`.
+* Enables shuffled loading with `yolo_rgb_collate_fn`.
+* Enables pinned memory.
+* Enables persistent workers when `num_workers` is greater than zero.
+
+When using `--num-workers 0`, persistent workers are disabled because PyTorch does not permit persistent workers without worker processes.
+
+On Windows, use an ASCII-only dataset path where possible because OpenCV may fail to read images from paths containing non-ASCII characters.
+
+Run the unit tests with:
+
+```bash
+python -m unittest discover -s tests -v
+```
