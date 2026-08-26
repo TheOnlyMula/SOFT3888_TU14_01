@@ -36,28 +36,84 @@ class DSECFusionDataset(Dataset):
         return torch.from_numpy(hist)
 
     def __getitem__(self, idx):
-        # Fetch raw dictionary from your working DSECDet loader
         sample = self.base_dataset[idx]
 
         # RGB Image
         image = sample["image"]
-        h, w = image.shape[0], image.shape[1]  # Extract actual height and width
+        h, w = image.shape[0], image.shape[1]
         img_tensor = torch.from_numpy(image).permute(2, 0, 1).float() / 255.0
 
-        # Bounding Box Targets
-        targets = sample["tracks"]
+        # YOLO Bounding Box Conversion
+        yolo_targets = []
+        for box in sample["tracks"]:
+            cls_id = int(box["class_id"])
+            box_x, box_y, box_w, box_h = box["x"], box["y"], box["w"], box["h"]
+            
+            # Calculate center points and normalize
+            x_center = (box_x + box_w / 2.0) / w
+            y_center = (box_y + box_h / 2.0) / h
+            norm_w = box_w / w
+            norm_h = box_h / h
+            
+            yolo_targets.append([cls_id, x_center, y_center, norm_w, norm_h])
+            
+        # Convert to a PyTorch tensor
+        target_tensor = torch.tensor(yolo_targets, dtype=torch.float32)
 
-        # Event Representation
         if self.rgb_only:
-            event_tensor = torch.empty(0)
+            return img_tensor, target_tensor
         else:
-            # Pass the exact image dimensions so the event tensor matches perfectly
             event_tensor = self.generate_event_histogram(
                 sample.get("events"), height=h, width=w
             )
+            return img_tensor, event_tensor, target_tensor
 
-        return img_tensor, event_tensor, targets
+def yolo_rgb_collate_fn(batch):
+    """Collate function for RGB-only YOLO training."""
+    imgs, targets = zip(*batch)
+    
+    # Stack images into a standard batch tensor
+    imgs = torch.stack(imgs, 0)
+    
+    # Add the batch index to the targets
+    targets_with_idx = []
+    for i, target in enumerate(targets):
+        if target.shape[0] > 0:
+            batch_idx = torch.full((target.shape[0], 1), i, dtype=target.dtype)
+            targets_with_idx.append(torch.cat((batch_idx, target), dim=1))
+            
+    if len(targets_with_idx) > 0:
+        targets = torch.cat(targets_with_idx, 0) # Shape: [Total_Boxes, 6]
+    else:
+        targets = torch.empty((0, 6))
+        
+    return imgs, targets
 
+def yolo_collate_fn(batch):
+    """
+    Collate function for YOLO to handle variable number of bounding boxes.
+    """
+    imgs, events, targets = zip(*batch)
+    
+    # Stack images and events into standard batch tensors
+    imgs = torch.stack(imgs, 0)
+    events = torch.stack(events, 0)
+    
+    # Add the batch index to the targets
+    targets_with_idx = []
+    for i, target in enumerate(targets):
+        if target.shape[0] > 0:
+            # Create a column of batch indices (i)
+            batch_idx = torch.full((target.shape[0], 1), i, dtype=target.dtype)
+            # Concatenate index with the [cls, x, y, w, h] tensor
+            targets_with_idx.append(torch.cat((batch_idx, target), dim=1))
+            
+    if len(targets_with_idx) > 0:
+        targets = torch.cat(targets_with_idx, 0) # Shape: [Total_Boxes, 6]
+    else:
+        targets = torch.empty((0, 6))
+        
+    return imgs, events, targets
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -118,9 +174,16 @@ if __name__ == "__main__":
     event_vis[:, :, 0] = np.clip(events_np[1] * 50, 0, 255).astype(np.uint8)
 
     # Draw Bounding Boxes and Class Labels on both images
-    for box in targets:
-        x, y, w, h = int(box["x"]), int(box["y"]), int(box["w"]), int(box["h"])
-        cls_id = int(box["class_id"])
+    # Draw Bounding Boxes and Class Labels on both images
+    for row in targets:
+        cls_id = int(row[0].item())
+        x_c, y_c, norm_w, norm_h = row[1].item(), row[2].item(), row[3].item(), row[4].item()
+
+        # Un-normalize YOLO coordinates back to absolute pixels
+        w = int(norm_w * W)
+        h = int(norm_h * H)
+        x = int((x_c * W) - (w / 2))
+        y = int((y_c * H) - (h / 2))
 
         color = (COLORS[cls_id] * 255).astype(np.uint8).tolist()
         text = f"{CLASSES[cls_id]}"
@@ -133,29 +196,9 @@ if __name__ == "__main__":
         txt_height = int(1.5 * txt_size[1])
 
         for img in (img_np, event_vis):
-            # Draw bounding box
             cv2.rectangle(img, (x, y), (x + w, y + h), color, 2)
-
-            # Draw label background
-            cv2.rectangle(
-                img,
-                (x, y - txt_height),
-                (x + txt_size[0] + 1, y + 1),
-                txt_bk_color,
-                -1,
-            )
-
-            # Draw label text
-            cv2.putText(
-                img,
-                text,
-                (x, y + txt_size[1] - txt_height),
-                font,
-                0.4,
-                txt_color,
-                thickness=1,
-            )
-
+            cv2.rectangle(img, (x, y - txt_height), (x + txt_size[0] + 1, y + 1), txt_bk_color, -1)
+            cv2.putText(img, text, (x, y + txt_size[1] - txt_height), font, 0.4, txt_color, 1)
     # Display the results side by side
     combined_img = np.hstack((img_np, event_vis))
 
