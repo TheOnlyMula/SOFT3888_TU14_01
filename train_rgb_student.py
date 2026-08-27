@@ -68,7 +68,7 @@ def parse_args() -> argparse.Namespace:
 
 
 
-def extract_trainable_model(weights_path: str = "yolo26n.pt", device: str | None = None):
+def extract_trainable_model(weights_path: str = "yolo26n.pt", device: str | None = None) -> torch.nn.Module:
     """
     Load a pretrained YOLO wrapper, extract the raw PyTorch nn.Module,
     prep it for custom training, and bind loss hyperparameters.
@@ -77,10 +77,6 @@ def extract_trainable_model(weights_path: str = "yolo26n.pt", device: str | None
         model (torch.nn.Module): the raw detection model, ready to be
         used directly in a custom PyTorch training loop.
     """
-    if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-    device = torch.device(device)
-
     yolo_wrapper = YOLO(weights_path)
     model = yolo_wrapper.model
     model.train()
@@ -109,6 +105,7 @@ def main() -> None:
         batch_size=args.batch_size,
         num_workers=args.num_workers,
     )
+    
     model = extract_trainable_model("yolo26n.pt", device=str(device))
 
     print(f"Selected device: {device}")
