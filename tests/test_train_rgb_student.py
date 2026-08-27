@@ -71,7 +71,7 @@ class TrainRgbStudentTests(unittest.TestCase):
         mock_yolo_instance = mock_yolo_class.return_value
         mock_yolo_instance.model = mock_torch_model
 
-        device = "cpu"
+        device = torch.device("cpu")
         result = extract_trainable_model(weights_path="dummy.pt", device=device)
 
         # Assert: Verify YOLO was instantiated correctly
@@ -79,7 +79,7 @@ class TrainRgbStudentTests(unittest.TestCase):
 
         # Assert: Verify state changes
         mock_torch_model.train.assert_called_once()
-        mock_torch_model.to.assert_called_once_with(torch.device(device))
+        mock_torch_model.to.assert_called_once_with(device) 
 
         # Assert: Verify gradients were enabled
         for param in mock_torch_model.parameters():
@@ -91,7 +91,7 @@ class TrainRgbStudentTests(unittest.TestCase):
         self.assertEqual(result.args.box, 7.5)
         self.assertEqual(result.args.cls, 0.5)
         self.assertEqual(result.args.dfl, 1.5)
-        self.assertEqual(result.args.device, torch.device(device))
+        self.assertEqual(result.args.device, device)
 
     def test_optimiser_configuration(self):
         model = torch.nn.Sequential(
