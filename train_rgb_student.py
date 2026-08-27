@@ -1,8 +1,11 @@
 import argparse
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 from torch.utils.data import DataLoader
+
+from ultralytics import YOLO
 
 from dataset_loader import DSECFusionDataset, yolo_rgb_collate_fn
 
@@ -64,6 +67,39 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+
+def extract_trainable_model(weights_path: str = "yolo26n.pt", device: str | None = None):
+    """
+    Load a pretrained YOLO wrapper, extract the raw PyTorch nn.Module,
+    prep it for custom training, and bind loss hyperparameters.
+
+    Returns:
+        model (torch.nn.Module): the raw detection model, ready to be
+        used directly in a custom PyTorch training loop.
+    """
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = torch.device(device)
+
+    yolo_wrapper = YOLO(weights_path)
+    model = yolo_wrapper.model
+    model.train()
+    model = model.to(device)
+
+    for param in model.parameters():
+        param.requires_grad = True
+
+    model.args = SimpleNamespace(
+        box=7.5,
+        cls=0.5,
+        dfl=1.5,
+        device=device,
+    )
+
+    return model
+
+
+
 def main() -> None:
     args = parse_args()
 
@@ -73,6 +109,7 @@ def main() -> None:
         batch_size=args.batch_size,
         num_workers=args.num_workers,
     )
+    model = extract_trainable_model("yolo26n.pt", device=str(device))
 
     print(f"Selected device: {device}")
     print(f"Dataset samples: {len(dataloader.dataset)}")
@@ -85,3 +122,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
