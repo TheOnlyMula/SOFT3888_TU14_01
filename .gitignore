@@ -1,0 +1,4 @@
+.venv/
+DSEC-det/
+__pycache__/
+*.pyc
