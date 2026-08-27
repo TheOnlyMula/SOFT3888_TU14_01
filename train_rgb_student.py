@@ -44,6 +44,15 @@ def create_rgb_dataloader(
     )
 
 
+def create_optimiser(model: torch.nn.Module) -> torch.optim.AdamW:
+    """Create the AdamW optimiser for the unfrozen RGB student parameters."""
+    return torch.optim.AdamW(
+        (parameter for parameter in model.parameters() if parameter.requires_grad),
+        lr=1e-3,
+        weight_decay=0.0005,
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Configure the RGB student DataLoader."
@@ -105,8 +114,9 @@ def main() -> None:
         batch_size=args.batch_size,
         num_workers=args.num_workers,
     )
-    
+
     model = extract_trainable_model("yolo26n.pt", device=str(device))
+    optimiser = create_optimiser(model)
 
     print(f"Selected device: {device}")
     print(f"Dataset samples: {len(dataloader.dataset)}")
@@ -119,4 +129,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
