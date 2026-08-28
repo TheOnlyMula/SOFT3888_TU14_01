@@ -109,9 +109,9 @@ def validate_model(
     """Evaluate the model on the validation set without updating weights."""
     model.eval()
     total_loss = 0.0
-
+    print("    Starting Validation...")
     with torch.no_grad():
-        for imgs, targets in val_loader:
+        for batch_idx_step, (imgs, targets) in enumerate(val_loader):
             imgs = imgs.to(device)
             targets = targets.to(device)
 
@@ -123,13 +123,16 @@ def validate_model(
             }
 
             loss, _ = model(batch_data)
+            step_loss = loss.sum().item()
             total_loss += loss.sum().item()
-
+            if batch_idx_step % 20 == 0 and batch_idx_step > 0:
+                print(f"        Val Step [{batch_idx_step}/{len(val_loader)}] "
+                      f"| Current Val Loss: {step_loss:.4f}")
     return total_loss / len(val_loader)
 
 def train_model(train_loader: DataLoader, val_loader: DataLoader, model: torch.nn.Module, optimiser: torch.optim.AdamW, device: torch.device) -> None:
     """Trains the RGB only student model."""
-    epochs = 1 # Change this to desired epoch. Hardcoded right now, but can change later
+    epochs = 2 # Change this to desired epoch. Hardcoded right now, but can change later
     for epoch in range(epochs):
         print(f"--- Starting Epoch {epoch + 1}/{epochs} ---")
         model.train()
@@ -160,9 +163,16 @@ def train_model(train_loader: DataLoader, val_loader: DataLoader, model: torch.n
                 print(f"    Epoch [{epoch + 1}/{epochs}] Step [{batch_idx_step}/{len(train_loader)}] "
                       f"| Batch Loss: {step_loss:.4f}")
 
-        avg_batch_loss = total_loss / len(train_loader)
-        val_loss = validate_model(val_loader, model, device)
-        print(f"--- Epoch {epoch + 1} completed | Avg Batch Loss: {avg_batch_loss:.4f} | Validation Loss:{val_loss:.4f} ---\n")
+        avg_train_batch_loss = total_loss / len(train_loader)
+        avg_train_image_loss = avg_train_batch_loss / train_loader.batch_size
+        
+        avg_val_batch_loss = validate_model(val_loader, model, device)
+        avg_val_image_loss = avg_val_batch_loss / val_loader.batch_size
+        
+        print(f"\n================ Epoch {epoch + 1}/{epochs} Summary ================")
+        print(f"  Train | Batch Loss: {avg_train_batch_loss:.4f} | Image Loss: {avg_train_image_loss:.4f}")
+        print(f"  Valid | Batch Loss: {avg_val_batch_loss:.4f} | Image Loss: {avg_val_image_loss:.4f}")
+        print(f"====================================================\n")
 
 
 
@@ -193,7 +203,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     device = select_device()
-    train_loader, val_loader = create_rgb_dataloader(
+    train_loader, val_loader = create_rgb_dataloaders(
         dataset_path=args.dataset_path,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
@@ -206,10 +216,10 @@ def main() -> None:
     print(f"Training samples: {len(train_loader.dataset)}")
     print(f"Validation samples: {len(val_loader.dataset)}")
     print(f"Batch size: {train_loader.batch_size}")
-    print(f"Sampler: {type(dataloader.sampler).__name__}")
-    print(f"Number of workers: {dataloader.num_workers}")
-    print(f"Pin memory: {dataloader.pin_memory}")
-    print(f"Persistent workers: {dataloader.persistent_workers}")
+    print(f"Sampler: {type(train_loader.sampler).__name__}")
+    print(f"Number of workers: {train_loader.num_workers}")
+    print(f"Pin memory: {train_loader.pin_memory}")
+    print(f"Persistent workers: {train_loader.persistent_workers}")
     train_model(train_loader, val_loader, model, optimiser, device)
 
 if __name__ == "__main__":
