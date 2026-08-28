@@ -3,7 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, random_split
 
 from ultralytics import YOLO
 
@@ -15,14 +15,14 @@ def select_device() -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def create_rgb_dataloader(
+def create_rgb_dataloaders(
     dataset_path: Path,
     batch_size: int = 4,
     num_workers: int = 0,
-) -> DataLoader:
-    """Create the RGB-only DataLoader required by Issue #9."""
+) -> tuple[DataLoader, DataLoader]:
+    """Create reproducible 80/20 training and validation Dataloaders."""
     if not 1 <= batch_size <= 50:
-        raise ValueError("batch_size must be between 1 and 32")
+        raise ValueError("batch_size must be between 1 and 50")
 
     if num_workers < 0:
         raise ValueError("num_workers must be non-negative")
@@ -33,8 +33,19 @@ def create_rgb_dataloader(
         rgb_only=True,
     )
 
-    return DataLoader(
+    train_size = int(0.8 * len(dataset))
+    val_size = len(dataset) - train_size
+
+    generator = torch.Generator().manual_seed(42)
+
+    train_dataset, val_dataset = random_split(
         dataset,
+        [train_size, val_size],
+        generator=generator,
+    )
+
+    train_loader = DataLoader(
+        train_dataset,
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
@@ -43,6 +54,17 @@ def create_rgb_dataloader(
         collate_fn=yolo_rgb_collate_fn,
     )
 
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=num_workers > 0,
+        collate_fn=yolo_rgb_collate_fn,
+    )
+
+    return train_loader, val_loader
 
 def extract_trainable_model(weights_path: str = "yolo26n.pt", device: str | None = None) -> torch.nn.Module:
     """
@@ -79,7 +101,33 @@ def create_optimiser(model: torch.nn.Module) -> torch.optim.AdamW:
         weight_decay=0.0005,
     )
 
-def train_model(train_loader: DataLoader, model: torch.nn.Module, optimiser: torch.optim.AdamW, device: torch.device) -> None:
+def validate_model(
+    val_loader: DataLoader,
+    model: torch.nn.Module,
+    device: torch.device,
+) -> float:
+    """Evaluate the model on the validation set without updating weights."""
+    model.eval()
+    total_loss = 0.0
+
+    with torch.no_grad():
+        for imgs, targets in val_loader:
+            imgs = imgs.to(device)
+            targets = targets.to(device)
+
+            batch_data = {
+                "img": imgs,
+                "cls": targets[:, 1:2],
+                "bboxes": targets[:, 2:],
+                "batch_idx": targets[:, 0],
+            }
+
+            loss, _ = model(batch_data)
+            total_loss += loss.sum().item()
+
+    return total_loss / len(val_loader)
+
+def train_model(train_loader: DataLoader, val_loader: DataLoader, model: torch.nn.Module, optimiser: torch.optim.AdamW, device: torch.device) -> None:
     """Trains the RGB only student model."""
     epochs = 1 # Change this to desired epoch. Hardcoded right now, but can change later
     for epoch in range(epochs):
@@ -113,8 +161,8 @@ def train_model(train_loader: DataLoader, model: torch.nn.Module, optimiser: tor
                       f"| Batch Loss: {step_loss:.4f}")
 
         avg_batch_loss = total_loss / len(train_loader)
-        avg_image_loss = avg_batch_loss / 32
-        print(f"--- Epoch {epoch + 1} completed | Avg Batch Loss: {avg_batch_loss:.4f} | Avg Loss Per Image: {avg_image_loss:.4f} ---\n")
+        val_loss = validate_model(val_loader, model, device)
+        print(f"--- Epoch {epoch + 1} completed | Avg Batch Loss: {avg_batch_loss:.4f} | Validation Loss:{val_loss:.4f} ---\n")
 
 
 
@@ -145,7 +193,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     device = select_device()
-    dataloader = create_rgb_dataloader(
+    train_loader, val_loader = create_rgb_dataloader(
         dataset_path=args.dataset_path,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
@@ -153,15 +201,16 @@ def main() -> None:
 
     model = extract_trainable_model("yolo26n.pt", device=str(device))
     optimiser = create_optimiser(model)
-    
+
     print(f"Selected device: {device}")
-    print(f"Dataset samples: {len(dataloader.dataset)}")
-    print(f"Batch size: {dataloader.batch_size}")
+    print(f"Training samples: {len(train_loader.dataset)}")
+    print(f"Validation samples: {len(val_loader.dataset)}")
+    print(f"Batch size: {train_loader.batch_size}")
     print(f"Sampler: {type(dataloader.sampler).__name__}")
     print(f"Number of workers: {dataloader.num_workers}")
     print(f"Pin memory: {dataloader.pin_memory}")
     print(f"Persistent workers: {dataloader.persistent_workers}")
-    train_model(dataloader, model, optimiser, device)
+    train_model(train_loader, val_loader, model, optimiser, device)
 
 if __name__ == "__main__":
     main()
