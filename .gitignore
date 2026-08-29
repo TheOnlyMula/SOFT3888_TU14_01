@@ -2,3 +2,6 @@
 DSEC-det/
 __pycache__/
 *.pyc
+DSEC_ROOT/
+yolo26n.pt
+runs/

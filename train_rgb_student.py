@@ -1,4 +1,7 @@
 import argparse
+import log
+import sys
+from io import TextIOWrapper
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,11 +12,9 @@ from ultralytics import YOLO
 
 from dataset_loader import DSECFusionDataset, yolo_rgb_collate_fn
 
-
 def select_device() -> torch.device:
     """Select CUDA when available; otherwise use CPU."""
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 
 def create_rgb_dataloaders(
     dataset_path: Path,
@@ -91,7 +92,6 @@ def extract_trainable_model(weights_path: str = "yolo26n.pt", device: str | None
     )
 
     return model
-
 
 def create_optimiser(model: torch.nn.Module) -> torch.optim.AdamW:
     """Create the AdamW optimiser for the unfrozen RGB student parameters."""
@@ -174,9 +174,6 @@ def train_model(train_loader: DataLoader, val_loader: DataLoader, model: torch.n
         print(f"  Valid | Batch Loss: {avg_val_batch_loss:.4f} | Image Loss: {avg_val_image_loss:.4f}")
         print(f"====================================================\n")
 
-
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Configure the RGB student DataLoader."
@@ -199,8 +196,10 @@ def parse_args() -> argparse.Namespace:
     )
     return parser.parse_args()
 
-
 def main() -> None:
+    log_directory = log.create_log_directory()
+    log.log_command(sys.argv, log_directory)
+
     args = parse_args()
     device = select_device()
     train_loader, val_loader = create_rgb_dataloaders(
@@ -212,15 +211,18 @@ def main() -> None:
     model = extract_trainable_model("yolo26n.pt", device=str(device))
     optimiser = create_optimiser(model)
 
-    print(f"Selected device: {device}")
-    print(f"Training samples: {len(train_loader.dataset)}")
-    print(f"Validation samples: {len(val_loader.dataset)}")
-    print(f"Batch size: {train_loader.batch_size}")
-    print(f"Sampler: {type(train_loader.sampler).__name__}")
-    print(f"Number of workers: {train_loader.num_workers}")
-    print(f"Pin memory: {train_loader.pin_memory}")
-    print(f"Persistent workers: {train_loader.persistent_workers}")
-    train_model(train_loader, val_loader, model, optimiser, device)
+    config = { 
+        'Selected Device': device, 
+        'Training Samples': len(train_loader.dataset), 
+        'Batch Size': train_loader.batch_size, 
+        'Sampler': type(train_loader.sampler).__name__, 
+        'Number of Workers': train_loader.num_workers, 
+        'Pin Memory': train_loader.pin_memory, 
+        'Persistent Workers': train_loader.persistent_workers
+    }
+    log.log_model_config(config, log_directory)
+
+    # train_model(train_loader, val_loader, model, optimiser, device)
 
 if __name__ == "__main__":
     main()
