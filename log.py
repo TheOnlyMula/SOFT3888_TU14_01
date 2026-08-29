@@ -1,6 +1,7 @@
 from pathlib import Path
 import yaml
 import logging
+import sys
 
 def create_log_directory() -> Path: 
     log_directory = Path("runs")
@@ -16,15 +17,44 @@ def create_log_directory() -> Path:
 
     return log_directory
 
-def log_model_config(config: dict, log_directory: Path):
-    width = max(len(setting) for setting in config)
+def log_model_config(config: dict, log_directory: Path, logger: logging.Logger):
+    width = max(len(setting) for setting in config)\
+    
+    logger.info("Model Configuration: ")
     for setting, configuration in config.items(): 
-        print(f"{setting:<{width}} : {configuration}")
+        logger.info(f"{setting:<{width}} : {configuration}")
 
-    with open(f"{log_directory}/config.yaml", "w") as file: 
+    with open(log_directory / "config.yaml", "w") as file: 
         yaml.dump(config, file)
 
 def log_command(argv: str, log_directory: Path):
     command = " ".join(argv)
-    with open(f"{log_directory}/run_command.txt", "w") as file: 
+
+    with open(log_directory / "run_command.txt", "w") as file: 
         file.write(command)
+
+def create_logger(name: str, log_directory: Path) -> logging.Logger: 
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.INFO)
+
+    if logger.handlers: 
+        logger.handlers.clear() 
+
+    # 2026-08-30 09:05:38 INFO     Selected Device    : cuda
+    log_format = "%(asctime)s %(levelname)-8s %(message)s"
+    date_format = "%Y-%m-%d %H:%M:%S"
+    formatter = logging.Formatter(fmt = log_format, datefmt = date_format)
+
+    file_handler = logging.FileHandler(
+        log_directory / "train.log", 
+        mode = "a"
+    )
+    file_handler.setFormatter(formatter)
+
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+
+    return logger
