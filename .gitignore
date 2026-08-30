@@ -2,10 +2,6 @@
 DSEC-det/
 __pycache__/
 *.pyc
-.venv/
-DSEC-det/
-__pycache__/
-*.pyc
 DSEC_ROOT/
 runs/
 
