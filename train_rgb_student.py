@@ -1,4 +1,8 @@
 import argparse
+import log
+import sys
+import logging
+from io import TextIOWrapper
 import math
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,7 +13,6 @@ from torch.utils.data import DataLoader, random_split
 from ultralytics import YOLO
 
 from dataset_loader import DSECFusionDataset, yolo_rgb_collate_fn
-
 
 def _prepare_yolo_batch(imgs, targets, device):
     """Move a collated batch to the device and expose YOLO's target fields."""
@@ -22,11 +25,9 @@ def _prepare_yolo_batch(imgs, targets, device):
         "batch_idx": targets[:, 0],
     }
 
-
 def select_device() -> torch.device:
     """Select CUDA when available; otherwise use CPU."""
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 
 def create_rgb_dataloaders(
     dataset_path: Path,
@@ -114,6 +115,7 @@ def evaluate_test_model(
     test_loader: DataLoader,
     model: torch.nn.Module,
     device: torch.device,
+    logger: logging.Logger, 
     checkpoint_path: Path = Path("best_student_yolo.pt"),
 ) -> tuple[float, float]:
     """Reload a trusted state_dict checkpoint and report batch-normalised test loss."""
@@ -141,7 +143,7 @@ def evaluate_test_model(
     total_loss = 0.0
     total_batches = 0
     total_images = 0
-    print(f"Loaded best checkpoint: {checkpoint_path}")
+    logger.info(f"Loaded best checkpoint: {checkpoint_path}")
     with torch.no_grad():
         for imgs, targets in test_loader:
             loss, _ = model(_prepare_yolo_batch(imgs, targets, device))
@@ -157,9 +159,9 @@ def evaluate_test_model(
 
     avg_test_batch_loss = total_loss / total_batches
     avg_test_image_loss = total_loss / total_images
-    print(f"Test samples: {total_images} | Test batches: {total_batches}")
-    print(f"Average test batch loss: {avg_test_batch_loss:.4f}")
-    print(f"Average test per-image loss: {avg_test_image_loss:.4f}")
+    logger.info(f"Test samples: {total_images} | Test batches: {total_batches}")
+    logger.info(f"Average test batch loss: {avg_test_batch_loss:.4f}")
+    logger.info(f"Average test per-image loss: {avg_test_image_loss:.4f}")
     return avg_test_batch_loss, avg_test_image_loss
 
 
@@ -189,7 +191,6 @@ def extract_trainable_model(weights_path: str = "yolo26n.pt", device: str | None
 
     return model
 
-
 def create_optimiser(model: torch.nn.Module) -> torch.optim.AdamW:
     """Create the AdamW optimiser for the unfrozen RGB student parameters."""
     return torch.optim.AdamW(
@@ -199,22 +200,25 @@ def create_optimiser(model: torch.nn.Module) -> torch.optim.AdamW:
     )
 
 def validate_model(
-    val_loader: DataLoader,
-    model: torch.nn.Module,
-    device: torch.device,
-) -> float:
-    """Evaluate the model on the validation set without updating weights."""
+        val_loader: DataLoader,
+        model: torch.nn.Module,
+        device: torch.device,
+        logger: logging.Logger
+    ) -> float:
+
+    # Evaluate the model on the validation set without updating weights. 
     model.eval()
     total_loss = 0.0
-    print("    Starting Validation...")
+    logger.info("    Starting Validation...")
     with torch.no_grad():
         for batch_idx_step, (imgs, targets) in enumerate(val_loader):
             loss, _ = model(_prepare_yolo_batch(imgs, targets, device))
             step_loss = loss.sum().item()
             total_loss += step_loss
             if batch_idx_step % 20 == 0 and batch_idx_step > 0:
-                print(f"        Val Step [{batch_idx_step}/{len(val_loader)}] "
+                logger.info(f"        Val Step [{batch_idx_step}/{len(val_loader)}] "
                       f"| Current Val Loss: {step_loss:.4f}")
+                
     return total_loss / len(val_loader)
 
 def train_model(
@@ -223,7 +227,8 @@ def train_model(
     model: torch.nn.Module,
     optimiser: torch.optim.AdamW,
     device: torch.device,
-    checkpoint_path: Path = Path("best_student_yolo.pt"),
+    logger: logging.Logger, 
+    checkpoint_path: Path = Path("best_student_yolo.pt")
 ) -> Path:
     """Train the student and save the weights with the lowest validation loss."""
     if len(train_loader) == 0 or len(val_loader) == 0:
@@ -231,9 +236,9 @@ def train_model(
     checkpoint_path = Path(checkpoint_path)
     best_val_loss = float("inf")
     saved_this_run = False
-    epochs = 1 # Change this to desired epoch. Hardcoded right now, but can change later
+    epochs = 1 # Change this to desired epoch. Hardcoded right now, but can change later    
     for epoch in range(epochs):
-        print(f"--- Starting Epoch {epoch + 1}/{epochs} ---")
+        logger.info(f"--- Starting Epoch {epoch + 1}/{epochs} ---")
         model.train()
         total_loss = 0.0
         for batch_idx_step, (imgs, targets) in enumerate(train_loader):
@@ -249,31 +254,30 @@ def train_model(
             total_loss += step_loss
 
             if batch_idx_step % 10 == 0:
-                print(f"    Epoch [{epoch + 1}/{epochs}] Step [{batch_idx_step}/{len(train_loader)}] "
-                      f"| Batch Loss: {step_loss:.4f}")
+                logger.info(f"    Epoch [{epoch + 1}/{epochs}] Step [{batch_idx_step}/{len(train_loader)}] "
+                        f"| Batch Loss: {step_loss:.4f}")
 
-        avg_train_batch_loss = total_loss / len(train_loader)
-        avg_train_image_loss = avg_train_batch_loss / train_loader.batch_size
-        
-        avg_val_batch_loss = validate_model(val_loader, model, device)
-        if not math.isfinite(avg_val_batch_loss):
-            raise ValueError("Non-finite validation loss; cannot select a best checkpoint.")
-        if avg_val_batch_loss < best_val_loss:
-            torch.save(model.state_dict(), checkpoint_path)
-            best_val_loss = avg_val_batch_loss
-            saved_this_run = True
-            print(f"Saved best checkpoint: {checkpoint_path} | Validation loss: {best_val_loss:.4f}")
-        avg_val_image_loss = avg_val_batch_loss / val_loader.batch_size
-        
-        print(f"\n================ Epoch {epoch + 1}/{epochs} Summary ================")
-        print(f"  Train | Batch Loss: {avg_train_batch_loss:.4f} | Image Loss: {avg_train_image_loss:.4f}")
-        print(f"  Valid | Batch Loss: {avg_val_batch_loss:.4f} | Image Loss: {avg_val_image_loss:.4f}")
-        print(f"====================================================\n")
+    avg_train_batch_loss = total_loss / len(train_loader)
+    avg_train_image_loss = avg_train_batch_loss / train_loader.batch_size
+    
+    avg_val_batch_loss = validate_model(val_loader, model, device, logger)
+    if not math.isfinite(avg_val_batch_loss):
+        raise ValueError("Non-finite validation loss; cannot select a best checkpoint.")
+    if avg_val_batch_loss < best_val_loss:
+        torch.save(model.state_dict(), checkpoint_path)
+        best_val_loss = avg_val_batch_loss
+        saved_this_run = True
+        logger.info(f"Saved best checkpoint: {checkpoint_path} | Validation loss: {best_val_loss:.4f}")
+    avg_val_image_loss = avg_val_batch_loss / val_loader.batch_size
+    
+    logger.info(f"\n================ Epoch {epochs + 1}/{epochs} Summary ================")
+    logger.info(f"  Train | Batch Loss: {avg_train_batch_loss:.4f} | Image Loss: {avg_train_image_loss:.4f}")
+    logger.info(f"  Valid | Batch Loss: {avg_val_batch_loss:.4f} | Image Loss: {avg_val_image_loss:.4f}")
+    logger.info(f"====================================================\n")
 
     if not saved_this_run:
         raise RuntimeError("No best checkpoint was saved during this training run.")
     return checkpoint_path
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -302,37 +306,43 @@ def parse_args() -> argparse.Namespace:
     )
     return parser.parse_args()
 
-
 def main() -> None:
+    log_directory = log.create_log_directory()
+    logger = log.create_logger("train", log_directory)
+
+    log.log_command(sys.argv, log_directory)
+
     args = parse_args()
     device = select_device()
     train_loader, val_loader = create_rgb_dataloaders(
-        dataset_path=args.dataset_path,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-    )
+            dataset_path=args.dataset_path,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+        )
 
     model = extract_trainable_model("yolo26n.pt", device=str(device))
     optimiser = create_optimiser(model)
 
-    print(f"Selected device: {device}")
-    print(f"Training samples: {len(train_loader.dataset)}")
-    print(f"Validation samples: {len(val_loader.dataset)}")
-    print(f"Batch size: {train_loader.batch_size}")
-    print(f"Sampler: {type(train_loader.sampler).__name__}")
-    print(f"Number of workers: {train_loader.num_workers}")
-    print(f"Pin memory: {train_loader.pin_memory}")
-    print(f"Persistent workers: {train_loader.persistent_workers}")
-    checkpoint_path = train_model(train_loader, val_loader, model, optimiser, device)
+    config = { 
+        'Selected Device': device, 
+        'Training Samples': len(train_loader.dataset), 
+        'Batch Size': train_loader.batch_size, 
+        'Sampler': type(train_loader.sampler).__name__, 
+        'Number of Workers': train_loader.num_workers, 
+        'Pin Memory': train_loader.pin_memory, 
+        'Persistent Workers': train_loader.persistent_workers
+    }
+    log.log_model_config(config, log_directory, logger)
+    checkpoint_path = train_model(train_loader, val_loader, model, optimiser, device, logger)
     if args.skip_test:
-        print("Test evaluation skipped (--skip-test).")
+        logger.info("Test evaluation skipped (--skip-test).")
         return
     test_loader = create_rgb_test_loader(
         dataset_path=args.dataset_path,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
     )
-    evaluate_test_model(test_loader, model, device, checkpoint_path)
+    evaluate_test_model(test_loader, model, device, logger, checkpoint_path)
 
 if __name__ == "__main__":
     main()
