@@ -69,6 +69,12 @@ Training/validation-only example (no test directory required):
 python train_rgb_student.py --dataset-path "/path/to/DSEC_ROOT" --batch-size 4 --num-workers 4 --skip-test
 ```
 
+Testing Only
+
+```bash
+python train_rgb_student.py --dataset-path "/path/to/DSEC_ROOT" --batch-size 4 --num-workers 4 --test-weights "runs/EXP_XX/best_student_yolo.pt"
+```
+
 The script:
 
 * Selects CUDA automatically when available, otherwise CPU.
