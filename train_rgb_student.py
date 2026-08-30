@@ -129,10 +129,10 @@ def evaluate_test_model(
 
     model.to(device)
     try:
-        state_dict = torch.load(
+        checkpoint = torch.load(
             checkpoint_path, map_location=device, weights_only=True
         )
-        model.load_state_dict(state_dict, strict=True)
+        model.load_state_dict(checkpoint["model_state_dict"], strict=True)
     except Exception as exc:
         # Stop here: never silently evaluate the final-epoch or incompatible weights.
         raise RuntimeError(
@@ -199,13 +199,38 @@ def create_optimiser(model: torch.nn.Module) -> torch.optim.AdamW:
         weight_decay=0.0005,
     )
 
+def load_checkpoint(checkpoint_path: str | Path, device: torch.device, model: torch.nn.Module, optimiser: torch.optim.AdamW) -> dict:
+    """ Load the checkpoint if it exists, otherwise return default values. """
+    if not Path(checkpoint_path).is_file():
+        return {'past_epochs': 0, 'latest_val_loss': float('inf')}
+
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+
+    model.load_state_dict(checkpoint["model_state_dict"])
+    optimiser.load_state_dict(checkpoint["optimiser_state_dict"])
+
+    return {'past_epochs': checkpoint["epoch"], 'latest_val_loss': checkpoint["val_loss"]}
+
+# Get model with lowest val_loss: 0 -> best_epoch & best_val_loss, 1 -> everything
+def fetch_best_dict(best_path: str | Path, device: torch.device, model: torch.nn.Module, optimiser: torch.optim.AdamW, mode: int = 0) -> dict:
+    """ Load the best checkpoint if it exists, otherwise return default values. """
+    if not Path(best_path).is_file():
+        return {'best_epoch': 0, 'best_val_loss': float('inf')}
+
+    best_state = torch.load(best_path, map_location=device)
+
+    if mode == 1:
+        model.load_state_dict(best_state["model_state_dict"])
+        optimiser.load_state_dict(best_state["optimiser_state_dict"])
+
+    return {'best_epoch': best_state["epoch"], 'best_val_loss': best_state["val_loss"]}
+
 def validate_model(
         val_loader: DataLoader,
         model: torch.nn.Module,
         device: torch.device,
         logger: logging.Logger
     ) -> float:
-
     # Evaluate the model on the validation set without updating weights. 
     model.eval()
     total_loss = 0.0
@@ -228,17 +253,33 @@ def train_model(
     optimiser: torch.optim.AdamW,
     device: torch.device,
     logger: logging.Logger, 
-    checkpoint_path: Path = Path("best_student_yolo.pt")
+    checkpoint_path: Path = Path("best_student_yolo.pt"),
+    latest_path: Path = Path("latest_student_yolo.pt")
 ) -> Path:
     """Train the student and save the weights with the lowest validation loss."""
     if len(train_loader) == 0 or len(val_loader) == 0:
         raise ValueError("Training and validation loaders must both be non-empty.")
+    
     checkpoint_path = Path(checkpoint_path)
-    best_val_loss = float("inf")
+    latest_path = Path(latest_path)
+    
+    total_epochs = 1 # Change this to desired epoch. Hardcoded right now, but can change later
+    
+    # Checkpoint logic from the weight-saving branch
+    checkpoint_info = load_checkpoint(latest_path, device, model, optimiser)
+    past_epochs = checkpoint_info["past_epochs"]
+    
+    if past_epochs >= total_epochs:
+        logger.info("ERROR: No more epochs to train")
+        return checkpoint_path
+        
+    # Get the historical best stats so we only overwrite if we beat the previous best
+    best_stats = fetch_best_dict(checkpoint_path, device, model, optimiser, mode=0)
+    best_val_loss = best_stats["best_val_loss"]
     saved_this_run = False
-    epochs = 1 # Change this to desired epoch. Hardcoded right now, but can change later    
-    for epoch in range(epochs):
-        logger.info(f"--- Starting Epoch {epoch + 1}/{epochs} ---")
+    
+    for epoch in range(past_epochs, total_epochs):
+        logger.info(f"--- Starting Epoch {epoch + 1}/{total_epochs} ---")
         model.train()
         total_loss = 0.0
         for batch_idx_step, (imgs, targets) in enumerate(train_loader):
@@ -254,26 +295,40 @@ def train_model(
             total_loss += step_loss
 
             if batch_idx_step % 10 == 0:
-                logger.info(f"    Epoch [{epoch + 1}/{epochs}] Step [{batch_idx_step}/{len(train_loader)}] "
+                logger.info(f"    Epoch [{epoch + 1}/{total_epochs}] Step [{batch_idx_step}/{len(train_loader)}] "
                         f"| Batch Loss: {step_loss:.4f}")
 
-    avg_train_batch_loss = total_loss / len(train_loader)
-    avg_train_image_loss = avg_train_batch_loss / train_loader.batch_size
-    
-    avg_val_batch_loss = validate_model(val_loader, model, device, logger)
-    if not math.isfinite(avg_val_batch_loss):
-        raise ValueError("Non-finite validation loss; cannot select a best checkpoint.")
-    if avg_val_batch_loss < best_val_loss:
-        torch.save(model.state_dict(), checkpoint_path)
-        best_val_loss = avg_val_batch_loss
-        saved_this_run = True
-        logger.info(f"Saved best checkpoint: {checkpoint_path} | Validation loss: {best_val_loss:.4f}")
-    avg_val_image_loss = avg_val_batch_loss / val_loader.batch_size
-    
-    logger.info(f"\n================ Epoch {epochs + 1}/{epochs} Summary ================")
-    logger.info(f"  Train | Batch Loss: {avg_train_batch_loss:.4f} | Image Loss: {avg_train_image_loss:.4f}")
-    logger.info(f"  Valid | Batch Loss: {avg_val_batch_loss:.4f} | Image Loss: {avg_val_image_loss:.4f}")
-    logger.info(f"====================================================\n")
+        avg_train_batch_loss = total_loss / len(train_loader)
+        avg_train_image_loss = avg_train_batch_loss / train_loader.batch_size
+        
+        avg_val_batch_loss = validate_model(val_loader, model, device, logger)
+        if not math.isfinite(avg_val_batch_loss):
+            raise ValueError("Non-finite validation loss; cannot select a best checkpoint.")
+            
+        # Weight saving per epoch (dict containing model and optimiser states)
+        checkpoint_dict = {
+            'epoch': epoch + 1, 
+            'model_state_dict': model.state_dict(), 
+            'optimiser_state_dict': optimiser.state_dict(), 
+            'val_loss': avg_val_batch_loss
+        }
+        
+        # Always save the latest checkpoint to resume training if interrupted
+        torch.save(checkpoint_dict, latest_path)
+
+        # Save best model if val_loss is lower than the current best_val_loss
+        if avg_val_batch_loss < best_val_loss:
+            torch.save(checkpoint_dict, checkpoint_path)
+            best_val_loss = avg_val_batch_loss
+            saved_this_run = True
+            logger.info(f"Saved best checkpoint: {checkpoint_path} | Validation loss: {best_val_loss:.4f}")
+            
+        avg_val_image_loss = avg_val_batch_loss / val_loader.batch_size
+        
+        logger.info(f"\n================ Epoch {epoch + 1}/{total_epochs} Summary ================")
+        logger.info(f"  Train | Batch Loss: {avg_train_batch_loss:.4f} | Image Loss: {avg_train_image_loss:.4f}")
+        logger.info(f"  Valid | Batch Loss: {avg_val_batch_loss:.4f} | Image Loss: {avg_val_image_loss:.4f}")
+        logger.info(f"====================================================\n")
 
     if not saved_this_run:
         raise RuntimeError("No best checkpoint was saved during this training run.")

@@ -2,9 +2,12 @@
 DSEC-det/
 __pycache__/
 *.pyc
-runs/ 
-yolo26n.pt
+.venv/
+DSEC-det/
+__pycache__/
+*.pyc
 DSEC_ROOT/
+runs/
 
 # Model weights and local training output
 *.pt
