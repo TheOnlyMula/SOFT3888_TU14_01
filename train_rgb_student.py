@@ -115,6 +115,7 @@ def evaluate_test_model(
     test_loader: DataLoader,
     model: torch.nn.Module,
     device: torch.device,
+    logger: logging.Logger, 
     checkpoint_path: Path = Path("best_student_yolo.pt"),
 ) -> tuple[float, float]:
     """Reload a trusted state_dict checkpoint and report batch-normalised test loss."""
@@ -142,7 +143,7 @@ def evaluate_test_model(
     total_loss = 0.0
     total_batches = 0
     total_images = 0
-    print(f"Loaded best checkpoint: {checkpoint_path}")
+    logger.info(f"Loaded best checkpoint: {checkpoint_path}")
     with torch.no_grad():
         for imgs, targets in test_loader:
             loss, _ = model(_prepare_yolo_batch(imgs, targets, device))
@@ -158,9 +159,9 @@ def evaluate_test_model(
 
     avg_test_batch_loss = total_loss / total_batches
     avg_test_image_loss = total_loss / total_images
-    print(f"Test samples: {total_images} | Test batches: {total_batches}")
-    print(f"Average test batch loss: {avg_test_batch_loss:.4f}")
-    print(f"Average test per-image loss: {avg_test_image_loss:.4f}")
+    logger.info(f"Test samples: {total_images} | Test batches: {total_batches}")
+    logger.info(f"Average test batch loss: {avg_test_batch_loss:.4f}")
+    logger.info(f"Average test per-image loss: {avg_test_image_loss:.4f}")
     return avg_test_batch_loss, avg_test_image_loss
 
 
@@ -205,7 +206,7 @@ def validate_model(
         logger: logging.Logger
     ) -> float:
 
-    """Evaluate the model on the validation set without updating weights."""
+    # Evaluate the model on the validation set without updating weights. 
     model.eval()
     total_loss = 0.0
     logger.info("    Starting Validation...")
@@ -217,6 +218,7 @@ def validate_model(
             if batch_idx_step % 20 == 0 and batch_idx_step > 0:
                 logger.info(f"        Val Step [{batch_idx_step}/{len(val_loader)}] "
                       f"| Current Val Loss: {step_loss:.4f}")
+                
     return total_loss / len(val_loader)
 
 def train_model(
@@ -225,8 +227,8 @@ def train_model(
     model: torch.nn.Module,
     optimiser: torch.optim.AdamW,
     device: torch.device,
-    checkpoint_path: Path = Path("best_student_yolo.pt"),
-    logger: logging.Logger
+    logger: logging.Logger, 
+    checkpoint_path: Path = Path("best_student_yolo.pt")
 ) -> Path:
     """Train the student and save the weights with the lowest validation loss."""
     if len(train_loader) == 0 or len(val_loader) == 0:
@@ -234,7 +236,8 @@ def train_model(
     checkpoint_path = Path(checkpoint_path)
     best_val_loss = float("inf")
     saved_this_run = False
-    epochs = 1 # Change this to desired epoch. Hardcoded right now, but can change later    for epoch in range(epochs):
+    epochs = 1 # Change this to desired epoch. Hardcoded right now, but can change later    
+    for epoch in range(epochs):
         logger.info(f"--- Starting Epoch {epoch + 1}/{epochs} ---")
         model.train()
         total_loss = 0.0
@@ -252,25 +255,25 @@ def train_model(
 
             if batch_idx_step % 10 == 0:
                 logger.info(f"    Epoch [{epoch + 1}/{epochs}] Step [{batch_idx_step}/{len(train_loader)}] "
-                      f"| Batch Loss: {step_loss:.4f}")
+                        f"| Batch Loss: {step_loss:.4f}")
 
-        avg_train_batch_loss = total_loss / len(train_loader)
-        avg_train_image_loss = avg_train_batch_loss / train_loader.batch_size
-        
-        avg_val_batch_loss = validate_model(val_loader, model, device)
-        if not math.isfinite(avg_val_batch_loss):
-            raise ValueError("Non-finite validation loss; cannot select a best checkpoint.")
-        if avg_val_batch_loss < best_val_loss:
-            torch.save(model.state_dict(), checkpoint_path)
-            best_val_loss = avg_val_batch_loss
-            saved_this_run = True
-            print(f"Saved best checkpoint: {checkpoint_path} | Validation loss: {best_val_loss:.4f}")
-        avg_val_image_loss = avg_val_batch_loss / val_loader.batch_size
-        
-        logger.info(f"\n================ Epoch {epoch + 1}/{epochs} Summary ================")
-        logger.info(f"  Train | Batch Loss: {avg_train_batch_loss:.4f} | Image Loss: {avg_train_image_loss:.4f}")
-        logger.info(f"  Valid | Batch Loss: {avg_val_batch_loss:.4f} | Image Loss: {avg_val_image_loss:.4f}")
-        logger.info(f"====================================================\n")
+    avg_train_batch_loss = total_loss / len(train_loader)
+    avg_train_image_loss = avg_train_batch_loss / train_loader.batch_size
+    
+    avg_val_batch_loss = validate_model(val_loader, model, device, logger)
+    if not math.isfinite(avg_val_batch_loss):
+        raise ValueError("Non-finite validation loss; cannot select a best checkpoint.")
+    if avg_val_batch_loss < best_val_loss:
+        torch.save(model.state_dict(), checkpoint_path)
+        best_val_loss = avg_val_batch_loss
+        saved_this_run = True
+        logger.info(f"Saved best checkpoint: {checkpoint_path} | Validation loss: {best_val_loss:.4f}")
+    avg_val_image_loss = avg_val_batch_loss / val_loader.batch_size
+    
+    logger.info(f"\n================ Epoch {epochs + 1}/{epochs} Summary ================")
+    logger.info(f"  Train | Batch Loss: {avg_train_batch_loss:.4f} | Image Loss: {avg_train_image_loss:.4f}")
+    logger.info(f"  Valid | Batch Loss: {avg_val_batch_loss:.4f} | Image Loss: {avg_val_image_loss:.4f}")
+    logger.info(f"====================================================\n")
 
     if not saved_this_run:
         raise RuntimeError("No best checkpoint was saved during this training run.")
@@ -332,14 +335,14 @@ def main() -> None:
     log.log_model_config(config, log_directory, logger)
     checkpoint_path = train_model(train_loader, val_loader, model, optimiser, device, logger)
     if args.skip_test:
-        print("Test evaluation skipped (--skip-test).")
+        logger.info("Test evaluation skipped (--skip-test).")
         return
     test_loader = create_rgb_test_loader(
         dataset_path=args.dataset_path,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
     )
-    evaluate_test_model(test_loader, model, device, checkpoint_path)
+    evaluate_test_model(test_loader, model, device, logger, checkpoint_path)
 
 if __name__ == "__main__":
     main()
