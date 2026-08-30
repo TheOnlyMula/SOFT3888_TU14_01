@@ -114,7 +114,7 @@ def evaluate_test_model(
     test_loader: DataLoader,
     model: torch.nn.Module,
     device: torch.device,
-    checkpoint_path: Path = Path("best_custom_yolo.pt"),
+    checkpoint_path: Path = Path("best_student_yolo.pt"),
 ) -> tuple[float, float]:
     """Reload a trusted state_dict checkpoint and report batch-normalised test loss."""
     checkpoint_path = Path(checkpoint_path)
@@ -223,7 +223,7 @@ def train_model(
     model: torch.nn.Module,
     optimiser: torch.optim.AdamW,
     device: torch.device,
-    checkpoint_path: Path = Path("best_custom_yolo.pt"),
+    checkpoint_path: Path = Path("best_student_yolo.pt"),
 ) -> Path:
     """Train the student and save the weights with the lowest validation loss."""
     if len(train_loader) == 0 or len(val_loader) == 0:
@@ -231,7 +231,7 @@ def train_model(
     checkpoint_path = Path(checkpoint_path)
     best_val_loss = float("inf")
     saved_this_run = False
-    epochs = 2 # Change this to desired epoch. Hardcoded right now, but can change later
+    epochs = 1 # Change this to desired epoch. Hardcoded right now, but can change later
     for epoch in range(epochs):
         print(f"--- Starting Epoch {epoch + 1}/{epochs} ---")
         model.train()

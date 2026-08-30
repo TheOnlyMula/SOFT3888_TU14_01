@@ -52,7 +52,7 @@ class PostTrainingEvaluationTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
-        self.checkpoint = Path(self.temp_dir.name) / "best_custom_yolo.pt"
+        self.checkpoint = Path(self.temp_dir.name) / "best_student_yolo.pt"
         self.device = torch.device("cpu")
         self.model = BatchLossModel()
         torch.save(self.model.state_dict(), self.checkpoint)
