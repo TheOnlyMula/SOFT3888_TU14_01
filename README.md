@@ -63,10 +63,10 @@ DSEC_ROOT/
         └── object_detections/
 ```
 
-Example:
+Training/validation-only example (no test directory required):
 
 ```bash
-python train_rgb_student.py --dataset-path "/path/to/DSEC_ROOT" --batch-size 4 --num-workers 4
+python train_rgb_student.py --dataset-path "/path/to/DSEC_ROOT" --batch-size 4 --num-workers 4 --skip-test
 ```
 
 The script:
@@ -86,3 +86,38 @@ Run the unit tests with:
 ```bash
 python -m unittest discover -s tests -v
 ```
+
+## Post-training test evaluation
+
+Training retains the existing seed-42 80/20 train/validation split and two epochs. The model with the lowest validation batch loss is saved as `best_custom_yolo.pt`. After training, it is restored and evaluated on `split="test"` with `shuffle=False`, `drop_last=False`, `model.eval()`, and `torch.no_grad()`.
+
+Provide separate labelled `train/` and `test/` directories. Each sequence needs `images/timestamps.txt`, `images/left/distorted/*.png`, and `object_detections/left/tracks.npy`, with aligned filenames, timestamps, and labels. RGB-only loading does not require event files; RGB+event mode still does. Do not use test sequences for training, validation, or model tuning.
+
+Run from the repository root with the project virtual environment:
+
+```powershell
+.\.venv\Scripts\python.exe train_rgb_student.py --dataset-path "D:\DSEC_ROOT" --batch-size 4 --num-workers 0
+```
+
+Append `--skip-test` for training/validation ONLY when no test split is available.
+
+The checkpoint is a PyTorch `state_dict` for the same model architecture, not an Ultralytics model archive. Use only trusted checkpoints. Loading failures, empty test data, or nonfinite losses stop evaluation without a final test summary.
+
+The console prints the loaded checkpoint, sample/batch counts, and:
+
+- **Average test batch loss:** total batch loss divided by processed batches.
+- **Average test per-image loss:** total batch loss divided by processed images.
+
+Batch loss is `loss.sum().item()`. Actual image counts include a partial last batch. These values are loss summaries, not mAP, precision, or recall.
+
+Install the dependencies in `requirements.txt` and DSEC-Detection in the same environment. Last verified on Windows/CPU with Python 3.14.7; fresh installations and CUDA have not been verified. Run the unit-test command above after changes.
+
+### Small integration check
+
+Use a prepared small labelled subset and a **new** output directory:
+
+```powershell
+.\.venv\Scripts\python.exe tools/run_issue17_smoke.py --dataset-root "D:\DSEC_ROOT" --output-dir "D:\DSEC_issue17_verify"
+```
+
+The helper uses 16 training and 4 validation samples, then evaluates **every** sample in the supplied test split. It records versions and selected indices in `run_metadata.json`, and measured losses/checkpoint verification in `test_results.json`. Keep datasets, weights, checkpoints, and logs out of Git. This checks integration, not full-dataset performance or generalisation; confirm the team's split provenance before reporting formal results.
