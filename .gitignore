@@ -2,3 +2,8 @@
 DSEC-det/
 __pycache__/
 *.pyc
+
+# Model weights and local training output
+*.pt
+*.pth
+issue17-*.log
