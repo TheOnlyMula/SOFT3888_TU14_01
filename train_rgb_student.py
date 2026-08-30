@@ -342,7 +342,7 @@ def parse_args() -> argparse.Namespace:
         "--dataset-path",
         type=Path,
         required=True,
-        help="DSEC root with labelled train and test directories (test optional with --skip-test).",
+        help="DSEC root with labelled train and test directories.",
     )
     parser.add_argument(
         "--batch-size",
@@ -359,23 +359,43 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run training and validation only; do not load the test split.",
     )
+    parser.add_argument(
+        "--test-weights",
+        type=Path,
+        default=None,
+        help="Path to a saved checkpoint. If provided, skips training and only runs the test evaluation.",
+    )
     return parser.parse_args()
 
 def main() -> None:
     log_directory = log.create_log_directory()
-    logger = log.create_logger("train", log_directory)
+    args = parse_args()
+    
+    # Create a differently named logger if we are only testing
+    is_test_only = args.test_weights is not None
+    logger_name = "test" if is_test_only else "train"
+    logger = log.create_logger(logger_name, log_directory)
 
     log.log_command(sys.argv, log_directory)
-
-    args = parse_args()
     device = select_device()
+    model = extract_trainable_model("yolo26n.pt", device=str(device))
+
+    if is_test_only:
+        logger.info(f"Test only mode activated. Evaluating weights at: {args.test_weights}")
+        test_loader = create_rgb_test_loader(
+            dataset_path=args.dataset_path,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+        )
+        evaluate_test_model(test_loader, model, device, logger, checkpoint_path=args.test_weights)
+        return 
+
     train_loader, val_loader = create_rgb_dataloaders(
             dataset_path=args.dataset_path,
             batch_size=args.batch_size,
             num_workers=args.num_workers,
         )
 
-    model = extract_trainable_model("yolo26n.pt", device=str(device))
     optimiser = create_optimiser(model)
 
     config = { 
@@ -388,16 +408,32 @@ def main() -> None:
         'Persistent Workers': train_loader.persistent_workers
     }
     log.log_model_config(config, log_directory, logger)
-    checkpoint_path = train_model(train_loader, val_loader, model, optimiser, device, logger)
+    
+    best_path = log_directory / "best_student_yolo.pt"
+    latest_path = log_directory / "latest_student_yolo.pt"
+
+    checkpoint_path = train_model(
+        train_loader, 
+        val_loader, 
+        model, 
+        optimiser, 
+        device, 
+        logger, 
+        checkpoint_path=best_path, 
+        latest_path=latest_path
+    )
+    
     if args.skip_test:
         logger.info("Test evaluation skipped (--skip-test).")
         return
+        
     test_loader = create_rgb_test_loader(
         dataset_path=args.dataset_path,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
     )
+    
     evaluate_test_model(test_loader, model, device, logger, checkpoint_path)
-
+    
 if __name__ == "__main__":
     main()
