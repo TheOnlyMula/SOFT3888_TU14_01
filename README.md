@@ -89,7 +89,7 @@ python -m unittest discover -s tests -v
 
 ## Post-training test evaluation
 
-Training retains the existing seed-42 80/20 train/validation split and two epochs. The model with the lowest validation batch loss is saved as `best_custom_yolo.pt`. After training, it is restored and evaluated on `split="test"` with `shuffle=False`, `drop_last=False`, `model.eval()`, and `torch.no_grad()`.
+Training retains the existing seed-42 80/20 train/validation split and two epochs. The model with the lowest validation batch loss is saved as `best_student_yolo.pt`. After training, it is restored and evaluated on `split="test"` with `shuffle=False`, `drop_last=False`, `model.eval()`, and `torch.no_grad()`.
 
 Provide separate labelled `train/` and `test/` directories. Each sequence needs `images/timestamps.txt`, `images/left/distorted/*.png`, and `object_detections/left/tracks.npy`, with aligned filenames, timestamps, and labels. RGB-only loading does not require event files; RGB+event mode still does. Do not use test sequences for training, validation, or model tuning.
 
