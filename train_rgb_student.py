@@ -129,10 +129,10 @@ def evaluate_test_model(
 
     model.to(device)
     try:
-        state_dict = torch.load(
+        checkpoint = torch.load(
             checkpoint_path, map_location=device, weights_only=True
         )
-        model.load_state_dict(state_dict, strict=True)
+        model.load_state_dict(checkpoint["model_state_dict"], strict=True)
     except Exception as exc:
         # Stop here: never silently evaluate the final-epoch or incompatible weights.
         raise RuntimeError(
@@ -263,7 +263,7 @@ def train_model(
     checkpoint_path = Path(checkpoint_path)
     latest_path = Path(latest_path)
     
-    total_epochs = 3 # Change this to desired epoch. Hardcoded right now, but can change later
+    total_epochs = 1 # Change this to desired epoch. Hardcoded right now, but can change later
     
     # Checkpoint logic from the weight-saving branch
     checkpoint_info = load_checkpoint(latest_path, device, model, optimiser)

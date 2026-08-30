@@ -8,15 +8,15 @@ import torch
 from torch.utils.data import RandomSampler, SequentialSampler
 
 from dataset_loader import yolo_rgb_collate_fn
-<<<<<<< HEAD
-from train_rgb_student import create_optimiser, create_rgb_dataloader, extract_trainable_model, fetch_best_dict, load_checkpoint, select_device
-=======
 from train_rgb_student import (
-        create_optimiser, create_rgb_dataloaders,
-        extract_trainable_model, select_device,
-        validate_model,
+    create_optimiser,
+    create_rgb_dataloaders,
+    extract_trainable_model,
+    fetch_best_dict,
+    load_checkpoint,
+    select_device,
+    validate_model,
 )
->>>>>>> main
 
 
 class TrainRgbStudentTests(unittest.TestCase):
@@ -181,9 +181,7 @@ class TrainRgbStudentTests(unittest.TestCase):
             optimised_parameters.isdisjoint(frozen_parameters)
         )
 
-<<<<<<< HEAD
-
-    ## Checkpoint loading tests
+## Checkpoint loading tests
     # Test that the checkpoint returns the correct epoch and validation loss
     def test_checkpoint_returns_epoch_validation_loss(self):
 
@@ -332,9 +330,9 @@ class TrainRgbStudentTests(unittest.TestCase):
             self.assertEqual(loaded_checkpoint['best_epoch'], 3)
             self.assertEqual(loaded_checkpoint['best_val_loss'], 0.25)
 
-=======
     def test_validation_uses_eval_mode_and_disables_gradients(self):
         model = MagicMock()
+        dummy_logger = MagicMock()
 
         images = torch.randn(2, 3, 32, 32)
         targets = torch.tensor(
@@ -359,13 +357,11 @@ class TrainRgbStudentTests(unittest.TestCase):
             val_loader,
             model,
             torch.device("cpu"),
+            dummy_logger
         )
 
         model.eval.assert_called_once()
         self.assertEqual(gradient_states, [False])
         self.assertEqual(val_loss, 1.5)
-
-
->>>>>>> main
 if __name__ == "__main__":
     unittest.main()
