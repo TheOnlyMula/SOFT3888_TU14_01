@@ -1,15 +1,22 @@
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 import torch
-from torch.utils.data import RandomSampler
+from torch.utils.data import RandomSampler, SequentialSampler
 
 from dataset_loader import yolo_rgb_collate_fn
+<<<<<<< HEAD
 from train_rgb_student import create_optimiser, create_rgb_dataloader, extract_trainable_model, fetch_best_dict, load_checkpoint, select_device
+=======
+from train_rgb_student import (
+        create_optimiser, create_rgb_dataloaders,
+        extract_trainable_model, select_device,
+        validate_model,
+)
+>>>>>>> main
 
 
 class TrainRgbStudentTests(unittest.TestCase):
@@ -28,36 +35,72 @@ class TrainRgbStudentTests(unittest.TestCase):
 
     @patch("train_rgb_student.DSECFusionDataset")
     def test_dataloader_configuration(self, dataset_class):
-        dataset_class.return_value = [None] * 8
-        dataset_path = Path("fake-dataset")
+        dataset_class.return_value = [None] * 10
 
-        loader = create_rgb_dataloader(
-            dataset_path=dataset_path,
+        train_loader, val_loader = create_rgb_dataloaders(
+            dataset_path=Path("fake-dataset"),
             batch_size=4,
             num_workers=4,
         )
 
+        self.assertEqual(len(train_loader.dataset), 8)
+        self.assertEqual(len(val_loader.dataset), 2)
+
+        self.assertIsInstance(train_loader.sampler, RandomSampler)
+        self.assertIsInstance(val_loader.sampler, SequentialSampler)
+
+        self.assertEqual(train_loader.batch_size, 4)
+        self.assertEqual(val_loader.batch_size, 4)
+
+        self.assertEqual(train_loader.num_workers, 4)
+        self.assertEqual(val_loader.num_workers, 4)
+
+        self.assertTrue(train_loader.pin_memory)
+        self.assertTrue(val_loader.pin_memory)
+
+        self.assertTrue(train_loader.persistent_workers)
+        self.assertTrue(val_loader.persistent_workers)
+
+        self.assertIs(train_loader.collate_fn, yolo_rgb_collate_fn)
+        self.assertIs(val_loader.collate_fn, yolo_rgb_collate_fn)
+
         dataset_class.assert_called_once_with(
-            dataset_path=dataset_path,
+            dataset_path=Path("fake-dataset"),
             split="train",
             rgb_only=True,
         )
-        self.assertEqual(loader.batch_size, 4)
-        self.assertIsInstance(loader.sampler, RandomSampler)
-        self.assertEqual(loader.num_workers, 4)
-        self.assertTrue(loader.pin_memory)
-        self.assertTrue(loader.persistent_workers)
-        self.assertIs(loader.collate_fn, yolo_rgb_collate_fn)
+
+    @patch("train_rgb_student.DSECFusionDataset")
+    def test_dataset_split_is_reproducible(self, dataset_class):
+        dataset_class.return_value = list(range(10))
+
+        train_loader_1, val_loader_1 = create_rgb_dataloaders(
+            Path("fake-dataset"),
+        )
+
+        train_loader_2, val_loader_2 = create_rgb_dataloaders(
+            Path("fake-dataset"),
+        )
+
+        self.assertEqual(
+            train_loader_1.dataset.indices,
+            train_loader_2.dataset.indices,
+        )
+
+        self.assertEqual(
+            val_loader_1.dataset.indices,
+            val_loader_2.dataset.indices,
+        )
 
     def test_invalid_configuration(self):
         with self.assertRaises(ValueError):
-            create_rgb_dataloader(Path("fake"), batch_size=0)
+            create_rgb_dataloaders(Path("fake"), batch_size=0)
 
         with self.assertRaises(ValueError):
-            create_rgb_dataloader(Path("fake"), batch_size=33)
+            create_rgb_dataloaders(Path("fake"), batch_size=51)
 
         with self.assertRaises(ValueError):
-            create_rgb_dataloader(Path("fake"), num_workers=-1)
+            create_rgb_dataloaders(Path("fake"), num_workers=-1)
 
     @patch("train_rgb_student.YOLO")
     def test_extract_trainable_model(self, mock_yolo_class):
@@ -80,7 +123,7 @@ class TrainRgbStudentTests(unittest.TestCase):
 
         # Assert: Verify state changes
         mock_torch_model.train.assert_called_once()
-        mock_torch_model.to.assert_called_once_with(device) 
+        mock_torch_model.to.assert_called_once_with(device)
 
         # Assert: Verify gradients were enabled
         for param in mock_torch_model.parameters():
@@ -138,6 +181,7 @@ class TrainRgbStudentTests(unittest.TestCase):
             optimised_parameters.isdisjoint(frozen_parameters)
         )
 
+<<<<<<< HEAD
 
     ## Checkpoint loading tests
     # Test that the checkpoint returns the correct epoch and validation loss
@@ -288,5 +332,40 @@ class TrainRgbStudentTests(unittest.TestCase):
             self.assertEqual(loaded_checkpoint['best_epoch'], 3)
             self.assertEqual(loaded_checkpoint['best_val_loss'], 0.25)
 
+=======
+    def test_validation_uses_eval_mode_and_disables_gradients(self):
+        model = MagicMock()
+
+        images = torch.randn(2, 3, 32, 32)
+        targets = torch.tensor(
+            [
+                [0, 1, 0.5, 0.5, 0.2, 0.2],
+                [1, 2, 0.4, 0.4, 0.1, 0.1],
+            ],
+            dtype=torch.float32,
+        )
+
+        val_loader = [(images, targets)]
+
+        gradient_states = []
+
+        def model_call(batch):
+            gradient_states.append(torch.is_grad_enabled())
+            return torch.tensor([1.5]), None
+
+        model.side_effect = model_call
+
+        val_loss = validate_model(
+            val_loader,
+            model,
+            torch.device("cpu"),
+        )
+
+        model.eval.assert_called_once()
+        self.assertEqual(gradient_states, [False])
+        self.assertEqual(val_loss, 1.5)
+
+
+>>>>>>> main
 if __name__ == "__main__":
     unittest.main()

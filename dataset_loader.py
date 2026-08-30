@@ -38,7 +38,14 @@ class DSECFusionDataset(Dataset):
         return torch.from_numpy(hist)
 
     def __getitem__(self, idx):
-        sample = self.base_dataset[idx]
+        if self.rgb_only:
+            # RGB-only training/testing must not open event files.
+            sample = {
+                "image": self.base_dataset.get_image(idx),
+                "tracks": self.base_dataset.get_tracks(idx),
+            }
+        else:
+            sample = self.base_dataset[idx]
 
         # RGB Image
         image = sample["image"]

@@ -6,7 +6,13 @@ opencv_python==4.13.0.92
 Pillow==12.3.0
 PyYAML==6.0.3
 seaborn==0.13.2
-torch==2.11.0
+# Versions verified by the Issue #17 Windows CPU integration run.
+torch==2.13.0
+torchvision==0.28.0
+ultralytics==8.4.135
 tqdm==4.66.6
 imageio==2.37.4
+<<<<<<< HEAD
 ultralytics==8.4.130
+=======
+>>>>>>> main
