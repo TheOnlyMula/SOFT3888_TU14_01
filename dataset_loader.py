@@ -9,6 +9,8 @@ from torch.utils.data import Dataset
 from dsec_det.dataset import DSECDet
 from dsec_det.label import CLASSES, COLORS
 
+from ultralytics import YOLO # YOLO import
+
 
 class DSECFusionDataset(Dataset):
     def __init__(self, dataset_path, split="train", rgb_only=False):

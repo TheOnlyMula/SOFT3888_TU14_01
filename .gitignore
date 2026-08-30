@@ -2,3 +2,12 @@
 DSEC-det/
 __pycache__/
 *.pyc
+best_student_yolo.pt
+latest_student_yolo.pt
+.vscode/
+.data
+dsec-det/
+.SOFT3888_TU14_01/
+data/
+week2_evidence/
+yolo26n.pt

@@ -79,11 +79,50 @@ def create_optimiser(model: torch.nn.Module) -> torch.optim.AdamW:
         weight_decay=0.0005,
     )
 
+def load_checkpoint(checkpoint_path: str | Path, device: torch.device, model: torch.nn.Module, optimiser: torch.optim.AdamW) -> dict:
+    """ Load the checkpoint if it exists, otherwise return default values. """
+    if not Path(checkpoint_path).is_file():
+        return {'past_epochs': 0, 'latest_val_loss': float('inf')}
+
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+
+    model.load_state_dict(checkpoint["model_state_dict"])
+    optimiser.load_state_dict(checkpoint["optimiser_state_dict"])
+
+    return {'past_epochs': checkpoint["epoch"], 'latest_val_loss': checkpoint["val_loss"]}
+
+# Get model with lowest val_loss: 0 -> best_epoch & best_val_loss, 1 -> everything
+def fetch_best_dict(best_path: str | Path, device: torch.device, model: torch.nn.Module, optimiser: torch.optim.AdamW, mode: int = 0) -> dict:
+    """ Load the best checkpoint if it exists, otherwise return default values. """
+    if not Path(best_path).is_file():
+        return {'best_epoch': 0, 'best_val_loss': float('inf')}
+
+    best_state = torch.load(best_path, map_location=device)
+
+    if mode == 1:
+        model.load_state_dict(best_state["model_state_dict"])
+        optimiser.load_state_dict(best_state["optimiser_state_dict"])
+
+    return {'best_epoch': best_state["epoch"], 'best_val_loss': best_state["val_loss"]}
+
+
 def train_model(train_loader: DataLoader, model: torch.nn.Module, optimiser: torch.optim.AdamW, device: torch.device) -> None:
-    """Trains the RGB only student model."""
-    epochs = 1 # Change this to desired epoch. Hardcoded right now, but can change later
-    for epoch in range(epochs):
-        print(f"--- Starting Epoch {epoch + 1}/{epochs} ---")
+    total_epochs = 3 # Change this to desired epoch. Hardcoded right now, but can change later
+    past_epochs = 0 # Past epochs (if applicable)
+
+    checkpoint_path = 'latest_student_yolo.pt'
+    best_path = 'best_student_yolo.pt'
+
+    checkpoint_info = load_checkpoint(checkpoint_path, device, model, optimiser)
+
+    past_epochs = checkpoint_info["past_epochs"]
+    if past_epochs >= total_epochs:
+
+        print("ERROR: No more epochs to train")
+        return
+
+    for epoch in range(past_epochs, total_epochs):
+        print(f"--- Starting Epoch {epoch + 1}/{total_epochs} ---")
         model.train()
         total_loss = 0.0
         for batch_idx_step, (imgs, targets) in enumerate(train_loader):
@@ -109,14 +148,23 @@ def train_model(train_loader: DataLoader, model: torch.nn.Module, optimiser: tor
             total_loss += step_loss
 
             if batch_idx_step % 10 == 0:
-                print(f"    Epoch [{epoch + 1}/{epochs}] Step [{batch_idx_step}/{len(train_loader)}] "
+                print(f"    Epoch [{epoch + 1}/{total_epochs}] Step [{batch_idx_step}/{len(train_loader)}] "
                       f"| Batch Loss: {step_loss:.4f}")
 
         avg_batch_loss = total_loss / len(train_loader)
         avg_image_loss = avg_batch_loss / 32
+        val_loss = 1 # val_loss set to 1 for now
+        
         print(f"--- Epoch {epoch + 1} completed | Avg Batch Loss: {avg_batch_loss:.4f} | Avg Loss Per Image: {avg_image_loss:.4f} ---\n")
 
+        # Weight saving per epoch
+        checkpoint_dict = {'epoch': epoch+1, 'model_state_dict': model.state_dict(), 
+                            'optimiser_state_dict': optimiser.state_dict(), 'val_loss': val_loss}
+        torch.save(checkpoint_dict, checkpoint_path)
 
+        # Save best model if val_loss is lower than the current best_val_loss
+        best_val_loss = fetch_best_dict(best_path, device, model, optimiser)['best_val_loss']
+        if val_loss < best_val_loss: torch.save(checkpoint_dict, best_path)
 
 
 def parse_args() -> argparse.Namespace:
