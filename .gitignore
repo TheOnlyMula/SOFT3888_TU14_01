@@ -1,15 +1,38 @@
-.venv/
-DSEC-det/
-__pycache__/
-*.pyc
-.venv/
-DSEC-det/
-__pycache__/
-*.pyc
-DSEC_ROOT/
-runs/
-
-# Model weights and local training output
+# Model weights and checkpoints
 *.pt
 *.pth
-issue17-*.log
+*.onnx
+best_student_yolo.pt
+latest_student_yolo.pt
+best_custom_yolo.pt
+
+# Ultralytics auto-downloads (yolo26n.pt lands in the working directory)
+yolo*.pt
+yolo*.yaml
+
+# Training runs, logs, and prediction overlays
+runs/
+*.log
+
+# Dataset
+DSEC*/
+data/
+datasets/
+*.h5
+*.hdf5
+*.npy
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
