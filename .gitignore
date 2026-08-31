@@ -2,9 +2,6 @@
 *.pt
 *.pth
 *.onnx
-best_student_yolo.pt
-latest_student_yolo.pt
-best_custom_yolo.pt
 
 # Ultralytics auto-downloads (yolo26n.pt lands in the working directory)
 yolo*.pt
