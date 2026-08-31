@@ -1,8 +1,11 @@
 import cv2
 import numpy as np
 import torch
+from ultralytics.utils.ops import non_max_suppression
 
 from dsec_det.label import CLASSES
+
+from train_rgb_student import extract_trainable_model
 
 # OpenCV draws in BGR.
 PREDICTION_COLOUR = (0, 0, 255)
@@ -15,6 +18,25 @@ def pad_to_stride(imgs, stride=32):
     pad_height = (-height) % stride
     pad_width = (-width) % stride
     return torch.nn.functional.pad(imgs, (0, pad_width, 0, pad_height))
+
+
+def load_student_model(checkpoint_path, weights_path, device):
+    """Rebuild the student and restore the trained weights in eval mode."""
+    model = extract_trainable_model(weights_path, device=str(device))
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    # Handles both the {'model_state_dict': ...} wrapper and a bare state_dict.
+    model.load_state_dict(checkpoint.get("model_state_dict", checkpoint))
+    model.eval()
+    return model
+
+
+@torch.no_grad()
+def predict_batch(model, imgs, device, conf=0.25, iou=0.45):
+    """Forward pass plus NMS. One [N, 6] tensor (xyxy, conf, cls) per image."""
+    raw = model(pad_to_stride(imgs.to(device)))
+    if isinstance(raw, (list, tuple)):
+        raw = raw[0]
+    return non_max_suppression(raw, conf_thres=conf, iou_thres=iou)
 
 
 def class_name(class_id):

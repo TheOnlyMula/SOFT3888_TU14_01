@@ -1,4 +1,7 @@
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import torch
@@ -9,8 +12,27 @@ from predict_visualise import (
     annotate_sample,
     class_name,
     ground_truth_boxes,
+    load_student_model,
     pad_to_stride,
+    predict_batch,
 )
+
+
+class FakeModel(torch.nn.Module):
+    """Records eval/grad state and returns a fixed raw prediction."""
+
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.tensor(1.0))
+        self.observed = []
+
+    def forward(self, imgs):
+        self.observed.append((self.training, torch.is_grad_enabled(), tuple(imgs.shape)))
+        # (batch, 4 + classes, anchors) with one confident anchor.
+        prediction = torch.zeros(len(imgs), 5, 2)
+        prediction[:, :4, 0] = torch.tensor([10.0, 10.0, 8.0, 8.0])
+        prediction[:, 4, 0] = 0.9
+        return prediction
 
 
 class DrawingTests(unittest.TestCase):
@@ -45,6 +67,48 @@ class DrawingTests(unittest.TestCase):
     def test_annotate_handles_no_detections(self):
         image = annotate_sample(torch.zeros(3, 32, 32), torch.empty((0, 6)), [])
         self.assertEqual(image.shape, (32, 32, 3))
+
+
+class InferenceTests(unittest.TestCase):
+    def test_forward_pass_is_padded_and_runs_without_gradients(self):
+        model = FakeModel()
+        model.eval()
+        detections = predict_batch(model, torch.zeros(2, 3, 30, 30), torch.device("cpu"))
+        training_mode, grad_enabled, shape = model.observed[0]
+        self.assertFalse(training_mode)
+        self.assertFalse(grad_enabled)
+        self.assertEqual(shape, (2, 3, 32, 32))
+        self.assertEqual(len(detections), 2)
+        self.assertEqual(detections[0].shape[1], 6)
+
+
+class CheckpointTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.directory = Path(self.temp_dir.name)
+        self.reference = FakeModel()
+        with torch.no_grad():
+            self.reference.weight.fill_(7.0)
+
+    def _load(self, path):
+        fresh = FakeModel()
+        fresh.train()
+        with patch("predict_visualise.extract_trainable_model", return_value=fresh):
+            return load_student_model(path, "dummy.pt", torch.device("cpu"))
+
+    def test_training_checkpoint_is_restored_in_eval_mode(self):
+        path = self.directory / "best_student_yolo.pt"
+        torch.save({"epoch": 2, "model_state_dict": self.reference.state_dict(),
+                    "optimiser_state_dict": {}, "val_loss": 0.5}, path)
+        model = self._load(path)
+        self.assertEqual(model.weight.item(), 7.0)
+        self.assertFalse(model.training)
+
+    def test_bare_state_dict_is_also_accepted(self):
+        path = self.directory / "bare.pt"
+        torch.save(self.reference.state_dict(), path)
+        self.assertEqual(self._load(path).weight.item(), 7.0)
 
 
 if __name__ == "__main__":
