@@ -15,8 +15,8 @@ Please refer to the Wiki for:
 Follow these steps to configure your local Python environment to run the project smoothly.
 
 **1. Setting Up the Environment**
-Install Miniforge3
-Clone the current repo
+
+Install Miniforge3, then clone the repository
 ```bash
 git clone https://github.sydney.edu.au/SOFT3888-TU14-01/SOFT3888_TU14_01.git
 cd SOFT3888-TU14-01
@@ -28,6 +28,7 @@ mamba activate dsec-env
 ```
 
 **2. Install Utility Packages**
+
 We rely on the official DSEC-Detection package to handle the raw dataset files. Clone the repository and install it in editable mode:
 ```bash
 git clone https://github.com/uzh-rpg/DSEC-det.git
