@@ -4,7 +4,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
-from ultralytics.utils.ops import non_max_suppression
+from ultralytics.utils.nms import non_max_suppression
 
 from dsec_det.label import CLASSES
 
@@ -111,26 +111,51 @@ def visualise_batches(test_loader, model, device, output_directory, num_batches=
     return paths
 
 
+def get_latest_checkpoint(default_name="best_student_yolo.pt"):
+    """Finds the most recent runs/exp_XXX folder containing the checkpoint."""
+    runs_dir = Path("runs")
+    if not runs_dir.exists():
+        return Path(default_name)
+    
+    exp_folders = sorted(
+        [d for d in runs_dir.iterdir() if d.is_dir() and d.name.startswith("exp")],
+        key=lambda x: x.stat().st_mtime,
+        reverse=True
+    )
+    
+    for folder in exp_folders:
+        ckpt_path = folder / default_name
+        if ckpt_path.exists():
+            print(f"Auto-detected latest checkpoint at: {ckpt_path}")
+            return ckpt_path
+            
+    return Path(default_name)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Draw predicted and ground-truth boxes on test images."
     )
     parser.add_argument("--dataset-path", type=Path, required=True)
-    parser.add_argument("--checkpoint", type=Path, default=Path("best_student_yolo.pt"))
+    parser.add_argument("--checkpoint", type=Path, default=None)
     parser.add_argument("--weights", default="yolo26n.pt")
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--num-batches", type=int, default=1)
     args = parser.parse_args()
 
+    if args.checkpoint is None:
+        args.checkpoint = get_latest_checkpoint("best_student_yolo.pt")
+
     device = select_device()
     print(f"Device: {device}")
+    
     model = load_student_model(args.checkpoint, args.weights, device)
     print(f"Loaded checkpoint: {args.checkpoint}")
 
     test_loader = create_rgb_test_loader(args.dataset_path, args.batch_size)
-    output_directory = log.create_log_directory() / "predictions"
+    output_directory = args.checkpoint.parent / "predictions"
     visualise_batches(test_loader, model, device, output_directory, args.num_batches)
 
 
 if __name__ == "__main__":
-    main()
+    main()  
