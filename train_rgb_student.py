@@ -2,7 +2,6 @@ import argparse
 import log
 import sys
 import logging
-from io import TextIOWrapper
 import math
 from pathlib import Path
 from types import SimpleNamespace
@@ -234,14 +233,14 @@ def validate_model(
     # Evaluate the model on the validation set without updating weights. 
     model.eval()
     total_loss = 0.0
-    logger.info("    Starting Validation...")
+    logger.info("Starting Validation...")
     with torch.no_grad():
         for batch_idx_step, (imgs, targets) in enumerate(val_loader):
             loss, _ = model(_prepare_yolo_batch(imgs, targets, device))
             step_loss = loss.sum().item()
             total_loss += step_loss
             if batch_idx_step % 20 == 0 and batch_idx_step > 0:
-                logger.info(f"        Val Step [{batch_idx_step}/{len(val_loader)}] "
+                logger.info(f"Val Step [{batch_idx_step}/{len(val_loader)}] "
                       f"| Current Val Loss: {step_loss:.4f}")
                 
     return total_loss / len(val_loader)
@@ -277,9 +276,15 @@ def train_model(
     best_stats = fetch_best_dict(checkpoint_path, device, model, optimiser, mode=0)
     best_val_loss = best_stats["best_val_loss"]
     saved_this_run = False
+
+    summary_width = 62
     
     for epoch in range(past_epochs, total_epochs):
-        logger.info(f"--- Starting Epoch {epoch + 1}/{total_epochs} ---")
+        
+        logger.info(f"\n{'=' * summary_width}")
+        logger.info(f"{f'Starting Epoch {epoch + 1}/{total_epochs}':^{summary_width}}")
+        logger.info(f"{'=' * summary_width}")
+
         model.train()
         total_loss = 0.0
         for batch_idx_step, (imgs, targets) in enumerate(train_loader):
@@ -294,9 +299,15 @@ def train_model(
             step_loss = batch_loss.item()
             total_loss += step_loss
 
+            step_width = len(str(len(train_loader)))
+            epoch_width = len(str(total_epochs))
+
             if batch_idx_step % 10 == 0:
-                logger.info(f"    Epoch [{epoch + 1}/{total_epochs}] Step [{batch_idx_step}/{len(train_loader)}] "
-                        f"| Batch Loss: {step_loss:.4f}")
+                logger.info(
+                    f"Epoch [{epoch + 1:>{epoch_width}}/{total_epochs}] "
+                    f"| Step [{batch_idx_step:>{step_width}}/{len(train_loader)}] "
+                    f"| Batch Loss: {step_loss:>10.4f}"
+                )
 
         avg_train_batch_loss = total_loss / len(train_loader)
         avg_train_image_loss = avg_train_batch_loss / train_loader.batch_size
@@ -324,14 +335,27 @@ def train_model(
             logger.info(f"Saved best checkpoint: {checkpoint_path} | Validation loss: {best_val_loss:.4f}")
             
         avg_val_image_loss = avg_val_batch_loss / val_loader.batch_size
-        
-        logger.info(f"\n================ Epoch {epoch + 1}/{total_epochs} Summary ================")
-        logger.info(f"  Train | Batch Loss: {avg_train_batch_loss:.4f} | Image Loss: {avg_train_image_loss:.4f}")
-        logger.info(f"  Valid | Batch Loss: {avg_val_batch_loss:.4f} | Image Loss: {avg_val_image_loss:.4f}")
-        logger.info(f"====================================================\n")
 
-    if not saved_this_run:
-        raise RuntimeError("No best checkpoint was saved during this training run.")
+        logger.info(f"\n{'=' * summary_width}")
+        logger.info(f"{f'Epoch {epoch}/{total_epochs} Summary':^{summary_width}}")
+        logger.info(f"{'-' * summary_width}")
+        logger.info(
+            f"{'Train':<6} | Batch Loss: {avg_train_batch_loss:>10.4f} "
+            f"| Image Loss: {avg_train_image_loss:>10.4f}"
+        )
+        logger.info(
+            f"{'Valid':<6} | Batch Loss: {avg_val_batch_loss:>10.4f} "
+            f"| Image Loss: {avg_val_image_loss:>10.4f}"
+        )
+        logger.info(f"{'=' * summary_width}\n")
+
+    # when the run is higher than the historical best, the code below would not save the run. 
+    # commented out in case this was the intended behaviour for later adjustment. 
+    # if not saved_this_run:
+    #     raise RuntimeError("No best checkpoint was saved during this training run.")
+    if not checkpoint_path.is_file(): 
+        raise RuntimeError("No best checkpoint was saved during this training run")
+
     return checkpoint_path
 
 def parse_args() -> argparse.Namespace:
@@ -398,9 +422,11 @@ def main() -> None:
 
     optimiser = create_optimiser(model)
 
+    # if possible, move the var total_epochs out of training and add as a configurable later
     config = { 
         'Selected Device': device, 
         'Training Samples': len(train_loader.dataset), 
+        'Validation Samples': len(val_loader.dataset), 
         'Batch Size': train_loader.batch_size, 
         'Sampler': type(train_loader.sampler).__name__, 
         'Number of Workers': train_loader.num_workers, 
@@ -419,8 +445,8 @@ def main() -> None:
         optimiser, 
         device, 
         logger, 
-        checkpoint_path=best_path, 
-        latest_path=latest_path
+        checkpoint_path = best_path, 
+        latest_path = latest_path
     )
     
     if args.skip_test:
