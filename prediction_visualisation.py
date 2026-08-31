@@ -1,3 +1,4 @@
+import argparse
 from pathlib import Path
 
 import cv2
@@ -7,7 +8,12 @@ from ultralytics.utils.ops import non_max_suppression
 
 from dsec_det.label import CLASSES
 
-from train_rgb_student import extract_trainable_model
+import log
+from train_rgb_student import (
+    create_rgb_test_loader,
+    extract_trainable_model,
+    select_device,
+)
 
 # OpenCV draws in BGR.
 PREDICTION_COLOUR = (0, 0, 255)
@@ -103,3 +109,28 @@ def visualise_batches(test_loader, model, device, output_directory, num_batches=
 
     print(f"Saved {len(paths)} images to {output_directory}")
     return paths
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Draw predicted and ground-truth boxes on test images."
+    )
+    parser.add_argument("--dataset-path", type=Path, required=True)
+    parser.add_argument("--checkpoint", type=Path, default=Path("best_student_yolo.pt"))
+    parser.add_argument("--weights", default="yolo26n.pt")
+    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--num-batches", type=int, default=1)
+    args = parser.parse_args()
+
+    device = select_device()
+    print(f"Device: {device}")
+    model = load_student_model(args.checkpoint, args.weights, device)
+    print(f"Loaded checkpoint: {args.checkpoint}")
+
+    test_loader = create_rgb_test_loader(args.dataset_path, args.batch_size)
+    output_directory = log.create_log_directory() / "predictions"
+    visualise_batches(test_loader, model, device, output_directory, args.num_batches)
+
+
+if __name__ == "__main__":
+    main()
