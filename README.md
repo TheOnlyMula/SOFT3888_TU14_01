@@ -92,6 +92,28 @@ Run the unit tests with:
 ```bash
 python -m unittest discover -s tests -v
 ```
+## RGB Image Degradation
+The script randomly darkens or overexposes each RGB image, then saves the degraded images into a separate output directory while preserving the original DSEC sequence structure.
+
+Training split example:
+
+```bash
+python RGB_image_Degradatoin.py --dataset-path "/path/to/DSEC_ROOT" --split train --output-path "/path/to/degraded_data"
+```
+
+Testing split example:
+
+```bash
+python RGB_image_Degradatoin.py --dataset-path "/path/to/DSEC_ROOT" --split test --output-path "/path/to/degraded_data"
+```
+
+The script:
+
+Loads RGB images from images/left/distorted.
+Randomly applies either darkening or overexposure.
+Keeps the original images unchanged.
+Saves degraded images into the selected output directory.
+Preserves the original split, sequence, and image directory structure.
 
 ## Post-training test evaluation
 
