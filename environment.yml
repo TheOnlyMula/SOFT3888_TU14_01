@@ -1,0 +1,30 @@
+name: dsec-env
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  # Base Python
+  - python=3.11
+
+  # GPU Configuration directly from PyTorch/NVIDIA
+  - pytorch=2.5.1
+  - torchvision
+  - pytorch-cuda=12.1
+  
+  # Core packages (handled by Conda for stable C++ bindings)
+  - h5py
+  - numba
+  - numpy
+  - opencv
+  - pillow
+  - pyyaml
+  - seaborn
+  - tqdm
+
+  # Pip installer for specialized packages
+  - pip
+  - pip:
+    - hdf5plugin==7.0.0
+    - ultralytics==8.4.128
