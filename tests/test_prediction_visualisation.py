@@ -15,6 +15,7 @@ from predict_visualise import (
     load_student_model,
     pad_to_stride,
     predict_batch,
+    visualise_batches,
 )
 
 
@@ -109,6 +110,33 @@ class CheckpointTests(unittest.TestCase):
         path = self.directory / "bare.pt"
         torch.save(self.reference.state_dict(), path)
         self.assertEqual(self._load(path).weight.item(), 7.0)
+
+
+class SavingTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.output = Path(self.temp_dir.name) / "exp_001" / "predictions"
+        self.model = FakeModel()
+        self.model.eval()
+
+    def _loader(self, batches):
+        targets = torch.tensor([[0.0, 1.0, 0.5, 0.5, 0.2, 0.2]])
+        return [(torch.zeros(2, 3, 32, 32), targets) for _ in range(batches)]
+
+    def test_images_are_written_to_the_output_directory(self):
+        paths = visualise_batches(self._loader(2), self.model,
+                                  torch.device("cpu"), self.output)
+        self.assertEqual([path.name for path in paths],
+                         ["batch0_image0.png", "batch0_image1.png"])
+        for path in paths:
+            self.assertGreater(path.stat().st_size, 0)
+
+    def test_num_batches_limits_how_much_is_read(self):
+        paths = visualise_batches(self._loader(3), self.model,
+                                  torch.device("cpu"), self.output, num_batches=2)
+        self.assertEqual(len(paths), 4)
+        self.assertEqual(len(self.model.observed), 2)
 
 
 if __name__ == "__main__":

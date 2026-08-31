@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import cv2
 import numpy as np
 import torch
@@ -77,3 +79,27 @@ def annotate_sample(img_tensor, detections, truth_boxes):
         draw_box(image, (x1, y1, x2, y2), label, PREDICTION_COLOUR)
 
     return image
+
+
+def visualise_batches(test_loader, model, device, output_directory, num_batches=1):
+    """Annotate the first few test batches and save each image."""
+    output_directory = Path(output_directory)
+    output_directory.mkdir(parents=True, exist_ok=True)
+
+    paths = []
+    for batch_index, (imgs, targets) in enumerate(test_loader):
+        if batch_index >= num_batches:
+            break
+        detections = predict_batch(model, imgs, device)
+        height, width = imgs.shape[-2:]
+        for i in range(len(imgs)):
+            truth_boxes = ground_truth_boxes(targets, i, width, height)
+            image = annotate_sample(imgs[i], detections[i], truth_boxes)
+            path = output_directory / f"batch{batch_index}_image{i}.png"
+            cv2.imwrite(str(path), image)
+            paths.append(path)
+            print(f"{path.name}: {len(detections[i])} predicted, "
+                  f"{len(truth_boxes)} ground truth")
+
+    print(f"Saved {len(paths)} images to {output_directory}")
+    return paths
