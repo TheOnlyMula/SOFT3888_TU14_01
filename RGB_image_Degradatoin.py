@@ -2,6 +2,7 @@ import argparse
 from pathlib import Path
 
 import cv2
+import random
 
 
 class RGBImageDegradation:
@@ -126,10 +127,97 @@ class RGBImageDegradation:
 
         return dataset
 
+    def degrade_brightness(self, image):
+        """
+        Randomly darken or overexpose an RGB image.
+        """
+        if random.choice([True, False]):
+            factor = random.uniform(0.3, 0.7)
+
+            degraded_image = cv2.convertScaleAbs(
+                image,
+                alpha=factor,
+                beta=0,
+            )
+
+        else:
+            factor = random.uniform(1.3, 2.0)
+
+            degraded_image = cv2.convertScaleAbs(
+                image,
+                alpha=factor,
+                beta=0,
+            )
+
+        return degraded_image
+
+    def degrade_dataset(self) -> list[dict]:
+        """
+        Apply brightness degradation to the selected DSEC split.
+        """
+        dataset = self.load_dataset()
+        degraded_dataset = []
+
+        for sample in dataset:
+            degraded_image = self.degrade_brightness(
+                sample["image"]
+            )
+
+            degraded_dataset.append({
+                "split": sample["split"],
+                "sequence": sample["sequence"],
+                "filename": sample["filename"],
+                "original_path": sample["original_path"],
+                "original_image": sample["image"],
+                "degraded_image": degraded_image,
+            })
+
+        return degraded_dataset
+
+    def save_degraded_dataset(
+        self,
+        output_path: Path
+    ) -> None:
+        """
+        Save brightness-degraded RGB images
+        to a separate directory.
+        """
+        degraded_dataset = self.degrade_dataset()
+
+        for sample in degraded_dataset:
+            save_directory = (
+                output_path
+                / self.split
+                / sample["sequence"]
+                / "images"
+                / "left"
+                / "distorted"
+            )
+
+            save_directory.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+
+            save_path = (
+                save_directory
+                / sample["filename"]
+            )
+
+            success = cv2.imwrite(
+                str(save_path),
+                sample["degraded_image"],
+            )
+
+            if not success:
+                raise RuntimeError(
+                    f"Failed to save image: {save_path}"
+                )
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Load RGB images from the DSEC dataset."
+        description="Load and degrade RGB images from the DSEC dataset."
     )
 
     parser.add_argument(
@@ -138,6 +226,14 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         required=True,
         help="Path to the root directory of the DSEC dataset.",
+    )
+
+    parser.add_argument(
+        "--output-path",
+        "-o",
+        type=Path,
+        default=Path("degraded_data"),
+        help="Directory used to save degraded RGB images.",
     )
 
     parser.add_argument(
@@ -172,21 +268,26 @@ def main() -> None:
     for sequence in sequences:
         print(f"  {sequence['name']}")
 
-    dataset = rgb_pipeline.load_dataset()
+    image_paths = rgb_pipeline.get_image_paths()
 
     print(
-        f"\nLoaded {len(dataset)} total "
+        f"\nFound {len(image_paths)} total "
         f"{args.split} RGB images."
     )
 
-    print("\nFirst RGB images:")
+    print(
+        f"\nSaving degraded images to: "
+        f"{args.output_path.resolve()}"
+    )
 
-    for sample in dataset[:5]:
-        print(
-            sample["sequence"],
-            sample["filename"],
-            sample["image"].shape,
-        )
+    rgb_pipeline.save_degraded_dataset(
+        args.output_path
+    )
+
+    print(
+        f"Saved {len(image_paths)} degraded "
+        f"RGB images."
+    )
 
 
 if __name__ == "__main__":
