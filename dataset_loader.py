@@ -4,19 +4,25 @@ import cv2
 import hdf5plugin  # Required to prevent Blosc decompression error
 import numpy as np
 import torch
-from torch.utils.data import Dataset
-
+from torch.utils.data import Dataset, DataLoader
 from dsec_det.dataset import DSECDet
 from dsec_det.label import CLASSES, COLORS
+from dsec_det.io import yaml_file_to_dict
 
 from ultralytics import YOLO # YOLO import
 
 
 class DSECFusionDataset(Dataset):
-    def __init__(self, dataset_path, split="train", rgb_only=False):
-        # sync="back" ensures one fixed event time window before the image
-        self.base_dataset = DSECDet(dataset_path, split=split, sync="back")
-        self.rgb_only = rgb_only  # Toggle for RGB-only evaluation mode
+    def __init__(self, dataset_path, split="train", rgb_only=False): 
+        split_config = yaml_file_to_dict(Path("./DSEC-det/config/train_val_test_split.yaml"))
+
+        self.base_dataset = DSECDet(
+            dataset_path, 
+            split=split, 
+            sync="back", 
+            split_config=split_config
+        )
+        self.rgb_only = rgb_only
 
     def __len__(self):
         return len(self.base_dataset)
@@ -124,94 +130,49 @@ def yolo_collate_fn(batch):
         
     return imgs, events, targets
 
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Visualize DSEC RGB and Event Histogram samples with bounding boxes."
+def create_rgb_dataloaders(
+    dataset_path: Path,
+    batch_size: int = 4,
+    num_workers: int = 0,
+) -> tuple[DataLoader, DataLoader]:
+    """Create reproducible training and validation Dataloaders using explicit sequence splits."""
+    if not 1 <= batch_size <= 50:
+        raise ValueError("batch_size must be between 1 and 50")
+
+    if num_workers < 0:
+        raise ValueError("num_workers must be non-negative")
+    
+    train_dataset = DSECFusionDataset(
+        dataset_path=dataset_path,
+        split="train",
+        rgb_only=True
     )
-    parser.add_argument(
-        "--dataset-path",
-        "-d",
-        type=Path,
-        required=True,
-        help="Path to the root directory of the DSEC dataset.",
+
+    val_dataset = DSECFusionDataset(
+        dataset_path=dataset_path,
+        split="val",
+        rgb_only=True
     )
-    parser.add_argument(
-        "--split",
-        "-s",
-        type=str,
-        default="train",
-        choices=["train", "val", "test"],
-        help="Dataset split to load (default: train).",
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,  
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=num_workers > 0,
+        collate_fn=yolo_rgb_collate_fn,
     )
-    parser.add_argument(
-        "--index",
-        "-i",
-        type=int,
-        default=0,
-        help="Sample index to fetch and visualize (default: 0).",
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False, 
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=num_workers > 0,
+        collate_fn=yolo_rgb_collate_fn,
     )
-    return parser.parse_args()
 
+    return train_loader, val_loader
 
-if __name__ == "__main__":
-    args = parse_args()
-
-    print(f"Loading dataset from: {args.dataset_path}")
-    my_dataset = DSECFusionDataset(args.dataset_path, split=args.split, rgb_only=False)
-
-    if args.index >= len(my_dataset) or args.index < 0:
-        raise IndexError(
-            f"Index {args.index} out of range. Dataset contains {len(my_dataset)} samples."
-        )
-
-    print(f"Fetching sample {args.index}...")
-    img_tensor, event_tensor, targets = my_dataset[args.index]
-
-    # --- VISUALIZATION CODE ---
-
-    # Convert RGB Tensor back to standard OpenCV image (H, W, C)
-    img_np = (img_tensor.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
-    img_np = np.ascontiguousarray(img_np)
-
-    # Convert Event Tensor into a color image
-    events_np = event_tensor.numpy()
-    H, W = events_np.shape[1], events_np.shape[2]
-    event_vis = np.zeros((H, W, 3), dtype=np.uint8)
-
-    # Match polarity colors: p=0 -> Red (BGR index 2), p=1 -> Blue (BGR index 0)
-    event_vis[:, :, 2] = np.clip(events_np[0] * 50, 0, 255).astype(np.uint8)
-    event_vis[:, :, 0] = np.clip(events_np[1] * 50, 0, 255).astype(np.uint8)
-
-    # Draw Bounding Boxes and Class Labels on both images
-    # Draw Bounding Boxes and Class Labels on both images
-    for row in targets:
-        cls_id = int(row[0].item())
-        x_c, y_c, norm_w, norm_h = row[1].item(), row[2].item(), row[3].item(), row[4].item()
-
-        # Un-normalize YOLO coordinates back to absolute pixels
-        w = int(norm_w * W)
-        h = int(norm_h * H)
-        x = int((x_c * W) - (w / 2))
-        y = int((y_c * H) - (h / 2))
-
-        color = (COLORS[cls_id] * 255).astype(np.uint8).tolist()
-        text = f"{CLASSES[cls_id]}"
-
-        txt_color = (0, 0, 0) if np.mean(COLORS[cls_id]) > 0.5 else (255, 255, 255)
-        font = cv2.FONT_HERSHEY_SIMPLEX
-
-        txt_size = cv2.getTextSize(text, font, 0.4, 1)[0]
-        txt_bk_color = (COLORS[cls_id] * 255 * 0.7).astype(np.uint8).tolist()
-        txt_height = int(1.5 * txt_size[1])
-
-        for img in (img_np, event_vis):
-            cv2.rectangle(img, (x, y), (x + w, y + h), color, 2)
-            cv2.rectangle(img, (x, y - txt_height), (x + txt_size[0] + 1, y + 1), txt_bk_color, -1)
-            cv2.putText(img, text, (x, y + txt_size[1] - txt_height), font, 0.4, txt_color, 1)
-    # Display the results side by side
-    combined_img = np.hstack((img_np, event_vis))
-
-    print("Opening visualizer window... (Press any key on the image window to close it)")
-    cv2.imshow(f"Sample {args.index}: RGB vs Event Histogram", combined_img)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()

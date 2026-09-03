@@ -3,9 +3,6 @@
 *.pth
 *.onnx
 
-# Ultralytics auto-downloads (yolo26n.pt lands in the working directory)
-yolo*.pt
-yolo*.yaml
 
 # Training runs, logs, and prediction overlays
 runs/
@@ -13,8 +10,8 @@ runs/
 
 # Dataset
 DSEC*/
-data/
-datasets/
+dsec*/
+data*/
 *.h5
 *.hdf5
 *.npy
