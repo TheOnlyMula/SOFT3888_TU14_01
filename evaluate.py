@@ -67,7 +67,8 @@ def validate_model(
 
 def evaluate_test_model(
     checkpoint_path: Path, 
-    data_yaml: Path,
+    model_yaml: Path | str,
+    data_yaml: Path | str,
     device: torch.device,
     logger: logging.Logger, 
 ):
@@ -76,7 +77,7 @@ def evaluate_test_model(
 
     logger.info(f"Loading best weights from {checkpoint_path} into Ultralytics engine...")
     
-    yolo_model = YOLO("yolo26n.yaml", task="detect") 
+    yolo_model = YOLO(str(model_yaml), task="detect") 
     
     dsec_names = {
         0: 'pedestrian', 1: 'rider', 2: 'car', 3: 'bus', 
@@ -108,15 +109,18 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description="Evaluate a trained YOLO model.")
     parser.add_argument("--weights", type=Path, required=True, help="Path to the trained weights (.pt)")
-    parser.add_argument("--data-yaml", type=Path, required=True, help="Path to the dataset YAML file.")
-    parser.add_argument("--type", type=str, required=True, help="Evaluating student or teacher")
+    parser.add_argument("--type", type=str, required=True, choices=["student", "teacher"], help="Evaluating student or teacher")
 
     args = parser.parse_args()
-
+    script_dir = Path(__file__).resolve().parent
+    
+    data_yaml = script_dir / "configs" / "dsec_rgb.yaml" 
+    model_yaml = script_dir / "configs" / f"yolo26n_{args.type}.yaml"  
+    
     log_directory = log.create_log_directory(args.type)
     logger = log.create_logger("evaluate", log_directory)
     log.log_command(sys.argv, log_directory)
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    evaluate_test_model(args.weights, args.data_yaml, device, logger)
+    evaluate_test_model(args.weights, model_yaml, data_yaml, device, logger)

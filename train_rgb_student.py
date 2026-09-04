@@ -5,6 +5,8 @@ import logging
 import math
 from pathlib import Path
 import torch
+from types import SimpleNamespace
+from ultralytics import YOLO
 from torch.utils.data import DataLoader
 from ultralytics import settings
 from evaluate import validate_model, evaluate_test_model, _prepare_yolo_batch
@@ -25,8 +27,8 @@ def train_model(
     device: torch.device,
     logger: logging.Logger, 
     total_epochs: int,
-    checkpoint_path: Path = Path("best_student_yolo.pt"),
-    latest_path: Path = Path("latest_student_yolo.pt")
+    checkpoint_path: Path,
+    latest_path: Path
 ) -> Path:
     """Train the student and save the weights with the lowest validation loss."""
     if len(train_loader) == 0 or len(val_loader) == 0:
@@ -48,7 +50,10 @@ def train_model(
     best_val_loss = best_stats["best_val_loss"]
 
     summary_width = 62
-    
+
+    step_width = len(str(len(train_loader)))
+    epoch_width = len(str(total_epochs))
+
     for epoch in range(past_epochs, total_epochs):
         
         logger.info(f"\n{'=' * summary_width}")
@@ -81,17 +86,14 @@ def train_model(
             step_cls_loss = loss_items['cls_loss']
             step_l1_loss = loss_items['l1_loss']
             
-            if isinstance(step_box_loss, torch.Tensor): step_box_loss = step_box_loss.item()
-            if isinstance(step_cls_loss, torch.Tensor): step_cls_loss = step_cls_loss.item()
-            if isinstance(step_l1_loss, torch.Tensor): step_l1_loss = step_l1_loss.item()
+            step_box_loss = float(loss_items['box_loss'])
+            step_cls_loss = float(loss_items['cls_loss'])
+            step_l1_loss = float(loss_items['l1_loss'])
 
             total_loss += step_loss
             total_train_box_loss += step_box_loss
             total_train_cls_loss += step_cls_loss
             total_train_l1_loss += step_l1_loss
-
-            step_width = len(str(len(train_loader)))
-            epoch_width = len(str(total_epochs))
 
             if batch_idx_step % 10 == 0:
                 logger.info(
@@ -171,7 +173,7 @@ def parse_args() -> argparse.Namespace:
         description="Train and validate the RGB student model."
     )
     script_dir = Path(__file__).resolve().parent
-    default_yaml_path = script_dir / "dsec_rgb.yaml"
+    default_yaml_path = script_dir / "configs" / "dsec_rgb.yaml"
     
     parser.add_argument(
         "--dataset-path", type=Path, required=True,
@@ -199,13 +201,18 @@ def main() -> None:
     log.log_command(sys.argv, log_directory)
     
     device = select_device()
-    model = extract_trainable_model("yolo26n.pt", device=str(device))
+    
+    model = extract_trainable_model(
+        yaml_path="configs/yolo26n_student.yaml", 
+        weights_path="yolo26n.pt", 
+        device=device
+    )
 
     train_loader, val_loader = create_rgb_dataloaders(
-            dataset_path=args.dataset_path,
-            batch_size=args.batch_size,
-            num_workers=args.num_workers,
-        )
+        dataset_path=args.dataset_path,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+    )
 
     optimiser = create_optimiser(model)
 
@@ -243,6 +250,7 @@ def main() -> None:
         
     evaluate_test_model(
         checkpoint_path=checkpoint_path, 
+        model_yaml="configs/yolo26n_student.yaml", 
         data_yaml=args.data_yaml,
         device=device, 
         logger=logger
