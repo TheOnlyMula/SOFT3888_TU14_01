@@ -16,6 +16,7 @@ data*/
 *.h5
 *.hdf5
 *.npy
+results
 
 # Python
 __pycache__/

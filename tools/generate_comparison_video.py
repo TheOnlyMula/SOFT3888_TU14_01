@@ -24,20 +24,26 @@ def add_title_to_image(img, title):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Generate AI vs GT Video for DSEC Det")
-    parser.add_argument("--dsec_merged", type=Path, required=True)
-    parser.add_argument("--weights", type=Path, required=True)
-    parser.add_argument("--output_video", type=Path, required=True)
-    parser.add_argument("--sequence", type=int, required=True)
+    parser.add_argument("--dsec_merged", type=Path, required=True, help="Path to DSEC dataset root")
+    parser.add_argument("--weights", type=Path, required=True, help="Path to trained weights (.pt)")
+    parser.add_argument("--type", type=str, required=True, choices=["student", "teacher"], help="Model type: student or teacher")
+    parser.add_argument("--sequence", type=int, required=True, help="Sequence index integer")
     parser.add_argument("--split", type=str, default="test", choices=['train', 'test'])
     parser.add_argument("--fps", type=int, default=20)
-    
     parser.add_argument("--debug", action="store_true", help="Apply gamma correction to brighten the visualization")
     
     args = parser.parse_args()
+    script_dir = Path(__file__).resolve().parent
+    
+
+    model_yaml = script_dir.parent / "configs" / f"yolo26n_{args.type}.yaml"
+    if not model_yaml.is_file():
+        model_yaml = script_dir / "configs" / f"yolo26n_{args.type}.yaml"
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    print(f"Loading YOLO26 architecture and weights from {args.weights}...")
-    model = YOLO("yolo26n.yaml", task="detect")
+    print(f"Loading YOLO26 architecture from {model_yaml} and weights from {args.weights}...")
+    model = YOLO(str(model_yaml), task="detect")
     
     dsec_names = {
         0: 'pedestrian', 1: 'rider', 2: 'car', 3: 'bus', 
@@ -67,6 +73,8 @@ if __name__ == '__main__':
         
     seq_name = dataset.subsequence_directories[args.sequence].name
     num_frames_in_seq = len(dataset.img_idx_track_idxs[seq_name]) - 1
+    
+    output_video_path = script_dir.parent / "results" / f"{seq_name}_{args.type}.mp4"
     
     print(f"Sequence {args.sequence} mapped to directory '{seq_name}'.")
     print(f"Extracting {num_frames_in_seq} frames (Global index {global_start_idx} to {global_start_idx + num_frames_in_seq - 1}).")
@@ -104,16 +112,16 @@ if __name__ == '__main__':
             new_w_gt = int(w_gt * (h_ai / h_gt))
             img_gt = cv2.resize(img_gt, (new_w_gt, h_ai))
         
-        img_ai = add_title_to_image(img_ai, "YOLO26 Student")
+        img_ai = add_title_to_image(img_ai, f"YOLO26 {args.type.capitalize()}")
         img_gt = add_title_to_image(img_gt, "Ground Truth")
             
         divider = np.full((img_ai.shape[0], 10, 3), fill_value=255, dtype="uint8")
         panel = np.hstack((img_ai, divider, img_gt))
         
         if video_writer is None:
-            args.output_video.parent.mkdir(parents=True, exist_ok=True)
-            video_writer = create_video_writer(args.output_video, args.fps, panel.shape[1], panel.shape[0])
-            print(f"Writing video to {args.output_video}... (Press 'q' in window to stop early)")
+            output_video_path.parent.mkdir(parents=True, exist_ok=True)
+            video_writer = create_video_writer(output_video_path, args.fps, panel.shape[1], panel.shape[0])
+            print(f"Writing video to {output_video_path}... (Press 'q' in window to stop early)")
             
         video_writer.write(panel)
         
