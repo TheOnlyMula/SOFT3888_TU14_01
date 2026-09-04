@@ -3,22 +3,28 @@ import yaml
 import logging
 import sys
 
-def create_log_directory() -> Path: 
-    log_directory = Path("runs")
-    log_directory.mkdir(exist_ok = True)
+def create_log_directory(role: str = "teacher") -> Path: 
+    """
+    Creates a numbered experiment directory inside either 'runs_teacher' or 'runs_student'.
+    
+    Args:
+        role (str): 'teacher' or 'student'.
+    """
+    log_directory = Path("runs") / role
+    log_directory.mkdir(parents=True, exist_ok=True)
 
-    experiment_number = 1 
+    experiment_number = 1
 
-    while (log_directory / f"exp_{experiment_number:03d}").exists(): 
+    while (log_directory / f"exp_{experiment_number:03d}").exists():
         experiment_number += 1
 
-    log_directory = log_directory / f"exp_{experiment_number:03d}"
-    log_directory.mkdir()
+    exp_directory = log_directory / f"exp_{experiment_number:03d}"
+    exp_directory.mkdir(parents=True, exist_ok=True)
 
-    return log_directory
+    return exp_directory
 
 def log_model_config(config: dict, log_directory: Path, logger: logging.Logger):
-    width = max(len(setting) for setting in config)\
+    width = max(len(setting) for setting in config)
     
     logger.info("Model Configuration: ")
     for setting, configuration in config.items(): 
@@ -27,7 +33,7 @@ def log_model_config(config: dict, log_directory: Path, logger: logging.Logger):
     with open(log_directory / "config.yaml", "w") as file: 
         yaml.dump(config, file)
 
-def log_command(argv: str, log_directory: Path):
+def log_command(argv: list[str], log_directory: Path):
     command = " ".join(argv)
 
     with open(log_directory / "run_command.txt", "w") as file: 
@@ -40,14 +46,13 @@ def create_logger(name: str, log_directory: Path) -> logging.Logger:
     if logger.handlers: 
         logger.handlers.clear() 
 
-    # 2026-08-30 09:05:38 INFO     Selected Device    : cuda
     log_format = "%(asctime)s %(levelname)-8s %(message)s"
     date_format = "%Y-%m-%d %H:%M:%S"
-    formatter = logging.Formatter(fmt = log_format, datefmt = date_format)
+    formatter = logging.Formatter(fmt=log_format, datefmt=date_format)
 
     file_handler = logging.FileHandler(
         log_directory / "train.log", 
-        mode = "a"
+        mode="a"
     )
     file_handler.setFormatter(formatter)
 

@@ -39,7 +39,7 @@ def load_student_model(checkpoint_path, weights_path, device):
 
 
 @torch.no_grad()
-def predict_batch(model, imgs, device, conf=0.25, iou=0.45):
+def predict_batch(model, imgs, device, conf=0.10, iou=0.65):
     """Forward pass plus NMS. One [N, 6] tensor (xyxy, conf, cls) per image."""
     raw = model(pad_to_stride(imgs.to(device)))
     if isinstance(raw, (list, tuple)):
