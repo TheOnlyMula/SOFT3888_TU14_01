@@ -6,7 +6,7 @@ import math
 from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
-
+from ultralytics import settings
 from evaluate import validate_model, evaluate_test_model, _prepare_yolo_batch
 from dataset_loader import create_rgb_dataloaders
 from utils import (
@@ -191,7 +191,8 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 def main() -> None:
-    log_directory = log.create_log_directory()
+    log_directory = log.create_log_directory("student")
+    settings.update({"runs_dir": str(log_directory)})
     args = parse_args()
     
     logger = log.create_logger("train", log_directory)

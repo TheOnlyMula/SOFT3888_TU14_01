@@ -9,7 +9,7 @@ from dsec_det.dataset import DSECDet
 from dsec_det.label import CLASSES, COLORS
 from dsec_det.io import yaml_file_to_dict
 
-from ultralytics import YOLO # YOLO import
+from ultralytics import YOLO 
 
 
 class DSECFusionDataset(Dataset):
@@ -27,8 +27,7 @@ class DSECFusionDataset(Dataset):
     def __len__(self):
         return len(self.base_dataset)
 
-    def generate_event_histogram(self, events, height=1080, width=1440):
-        # Generates a two channel event histogram representation
+    def generate_event_histogram(self, events, height=480, width=640):        # Generates a two channel event histogram representation
         hist = np.zeros((2, height, width), dtype=np.float32)
 
         # Check if events exist and if the internal 'x' array actually has data
@@ -81,9 +80,10 @@ class DSECFusionDataset(Dataset):
             event_tensor = self.generate_event_histogram(
                 sample.get("events"), height=h, width=w
             )
-            return img_tensor, event_tensor, target_tensor
+            fused_tensor = torch.cat((img_tensor, event_tensor), dim=0)
+            return fused_tensor, target_tensor
 
-def yolo_rgb_collate_fn(batch):
+def yolo_collate_fn(batch):
     """Collate function for RGB-only YOLO training."""
     imgs, targets = zip(*batch)
     
@@ -104,31 +104,6 @@ def yolo_rgb_collate_fn(batch):
         
     return imgs, targets
 
-def yolo_collate_fn(batch):
-    """
-    Collate function for YOLO to handle variable number of bounding boxes.
-    """
-    imgs, events, targets = zip(*batch)
-    
-    # Stack images and events into standard batch tensors
-    imgs = torch.stack(imgs, 0)
-    events = torch.stack(events, 0)
-    
-    # Add the batch index to the targets
-    targets_with_idx = []
-    for i, target in enumerate(targets):
-        if target.shape[0] > 0:
-            # Create a column of batch indices (i)
-            batch_idx = torch.full((target.shape[0], 1), i, dtype=target.dtype)
-            # Concatenate index with the [cls, x, y, w, h] tensor
-            targets_with_idx.append(torch.cat((batch_idx, target), dim=1))
-            
-    if len(targets_with_idx) > 0:
-        targets = torch.cat(targets_with_idx, 0) # Shape: [Total_Boxes, 6]
-    else:
-        targets = torch.empty((0, 6))
-        
-    return imgs, events, targets
 
 def create_rgb_dataloaders(
     dataset_path: Path,
@@ -161,7 +136,7 @@ def create_rgb_dataloaders(
         num_workers=num_workers,
         pin_memory=True,
         persistent_workers=num_workers > 0,
-        collate_fn=yolo_rgb_collate_fn,
+        collate_fn=yolo_collate_fn,
     )
 
     val_loader = DataLoader(
@@ -171,8 +146,43 @@ def create_rgb_dataloaders(
         num_workers=num_workers,
         pin_memory=True,
         persistent_workers=num_workers > 0,
-        collate_fn=yolo_rgb_collate_fn,
+        collate_fn=yolo_collate_fn,
     )
 
     return train_loader, val_loader
 
+def create_fusion_dataloaders(
+    dataset_path: Path,
+    batch_size: int = 4,
+    num_workers: int = 0,
+) -> tuple[DataLoader, DataLoader]:
+    """Create reproducible training and validation Dataloaders for the Fusion Teacher."""
+    if not 1 <= batch_size <= 50:
+        raise ValueError("batch_size must be between 1 and 50")
+    if num_workers < 0:
+        raise ValueError("num_workers must be non-negative")
+    
+    train_dataset = DSECFusionDataset(dataset_path=dataset_path, split="train", rgb_only=False)
+    val_dataset = DSECFusionDataset(dataset_path=dataset_path, split="val", rgb_only=False)
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,  
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=num_workers > 0,
+        collate_fn=yolo_collate_fn, 
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False, 
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=num_workers > 0,
+        collate_fn=yolo_collate_fn, 
+    )
+
+    return train_loader, val_loader

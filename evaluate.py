@@ -109,9 +109,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate a trained YOLO model.")
     parser.add_argument("--weights", type=Path, required=True, help="Path to the trained weights (.pt)")
     parser.add_argument("--data-yaml", type=Path, required=True, help="Path to the dataset YAML file.")
+    parser.add_argument("--type", type=str, required=True, help="Evaluating student or teacher")
+
     args = parser.parse_args()
 
-    log_directory = log.create_log_directory()
+    log_directory = log.create_log_directory(args.type)
     logger = log.create_logger("evaluate", log_directory)
     log.log_command(sys.argv, log_directory)
     
