@@ -32,3 +32,6 @@ env/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Ignore the commit where the code was copied
+1ff502f1602053e8d2e132032e31497eaa04177d
