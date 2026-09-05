@@ -255,6 +255,7 @@ def main() -> None:
         'Pin Memory': train_loader.pin_memory, 
         'Persistent Workers': train_loader.persistent_workers, 
         'Console Level' : args.console_level, 
+        'Skip Test Evaluation': args.skip_test,
     }
     log.log_model_config(config, log_directory, logger)
     
