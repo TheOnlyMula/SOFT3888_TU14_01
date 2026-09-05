@@ -32,7 +32,9 @@ def train_model(
 ) -> Path:
     """Train the student and save the weights with the lowest validation loss."""
     if len(train_loader) == 0 or len(val_loader) == 0:
-        raise ValueError("Training and validation loaders must both be non-empty.")
+        message = "Training and validation loaders must both be non-empty."
+        logger.error(message)
+        raise ValueError(message)
     
     checkpoint_path = Path(checkpoint_path)
     latest_path = Path(latest_path)
@@ -42,23 +44,27 @@ def train_model(
     past_epochs = checkpoint_info["past_epochs"]
     
     if past_epochs >= total_epochs:
-        logger.info("ERROR: No more epochs to train")
+        logger.info(
+            "Training skipped completed_epochs = %d target_epochs = %d",
+            past_epochs,
+            total_epochs,
+        )
         return checkpoint_path
         
     # Get the historical best stats so we only overwrite if we beat the previous best
-    best_stats = fetch_best_dict(checkpoint_path, device, model, optimiser, mode=0)
+    best_stats = fetch_best_dict(checkpoint_path, device, model, optimiser, mode = 0)
     best_val_loss = best_stats["best_val_loss"]
-
-    summary_width = 62
 
     step_width = len(str(len(train_loader)))
     epoch_width = len(str(total_epochs))
 
     for epoch in range(past_epochs, total_epochs):
         
-        logger.info(f"\n{'=' * summary_width}")
-        logger.info(f"{f'Starting Epoch {epoch + 1}/{total_epochs}':^{summary_width}}")
-        logger.info(f"{'=' * summary_width}")
+        logger.info(
+            "Epoch started epoch = %d/%d",
+            epoch + 1,
+            total_epochs,
+        )
 
         model.train()
         total_loss = 0.0
@@ -95,14 +101,19 @@ def train_model(
             total_train_cls_loss += step_cls_loss
             total_train_l1_loss += step_l1_loss
 
-            if batch_idx_step % 10 == 0:
-                logger.info(
-                    f"Epoch [{epoch + 1:>{epoch_width}}/{total_epochs}] "
-                    f"| Step [{batch_idx_step:>{step_width}}/{len(train_loader)}] "
-                    f"| Loss: {step_loss:>7.4f} "
-                    f"| Box: {step_box_loss:>7.4f} "
-                    f"| Cls: {step_cls_loss:>7.4f} "
-                    f"| L1: {step_l1_loss:>7.4f}"
+            step = batch_idx_step + 1
+            if step == 1 or step % 10 == 0 or step == len(train_loader):
+                logger.debug(
+                    "Batch completed epoch = %d/ %d step = %d/ %d "
+                    "loss = %.4f box_loss = %.4f cls_loss = %.4f l1_loss = %.4f",
+                    epoch + 1,
+                    total_epochs,
+                    step,
+                    len(train_loader),
+                    step_loss,
+                    step_box_loss,
+                    step_cls_loss,
+                    step_l1_loss,
                 )
 
         num_train_batches = len(train_loader)
@@ -119,7 +130,9 @@ def train_model(
          avg_val_l1_loss) = validate_model(val_loader, model, device, logger)
         
         if not math.isfinite(avg_val_batch_loss):
-            raise ValueError("Non-finite validation loss; cannot select a best checkpoint.")
+            message = "Non-finite validation loss; cannot select a best checkpoint."
+            logging.error(message)
+            raise ValueError(message)
             
         # Weight saving per epoch (dict containing model and optimiser states)
         checkpoint_dict = {
@@ -136,36 +149,41 @@ def train_model(
         if avg_val_batch_loss < best_val_loss:
             torch.save(checkpoint_dict, checkpoint_path)
             best_val_loss = avg_val_batch_loss
-            logger.info(f"Saved best checkpoint: {checkpoint_path} | Validation loss: {best_val_loss:.4f}")
+            logger.info(
+                "Best checkpoint saved epoch = %d val_loss = %.4f path = %s",
+                epoch + 1,
+                best_val_loss,
+                checkpoint_path,
+            )
             
         avg_val_image_loss = avg_val_batch_loss / val_loader.batch_size
 
-        logger.info(f"\n{'=' * summary_width}")
-        logger.info(f"{f'Epoch {epoch+1}/{total_epochs} Summary':^{summary_width}}")
-        logger.info(f"{'-' * summary_width}")
         logger.info(
-            f"{'Train':<6} | Batch Loss: {avg_train_batch_loss:>10.4f} "
-            f"| Image Loss: {avg_train_image_loss:>10.4f}"
+            "Epoch completed epoch = %d/%d "
+            "train_loss = %.4f val_loss = %.4f best_val_loss = %.4f",
+            epoch + 1,
+            total_epochs,
+            avg_train_batch_loss,
+            avg_val_batch_loss,
+            best_val_loss,
         )
-        logger.info(
-            f"{'':<6} | Box: {avg_train_box_loss:>8.4f} "
-            f"| Cls: {avg_train_cls_loss:>8.4f} "
-            f"| L1: {avg_train_l1_loss:>8.4f}"
+
+        logger.debug(
+            "Training metrics epoch = %d batch_loss = %.4f image_loss = %.4f "
+            "box_loss = %.4f cls_loss = %.4f l1_loss = %.4f",
+            epoch + 1,
+            avg_train_batch_loss,
+            avg_train_image_loss,
+            avg_train_box_loss,
+            avg_train_cls_loss,
+            avg_train_l1_loss,
         )
-        logger.info(
-            f"{'Valid':<6} | Batch Loss: {avg_val_batch_loss:>10.4f} "
-            f"| Image Loss: {avg_val_image_loss:>10.4f}"
-        )
-        logger.info(
-            f"{'':<6} | Box: {avg_val_box_loss:>8.4f} "
-            f"| Cls: {avg_val_cls_loss:>8.4f} "
-            f"| L1: {avg_val_l1_loss:>8.4f}"
-        )
-        logger.info(f"{'=' * summary_width}\n")
 
     if not checkpoint_path.is_file(): 
-        raise RuntimeError("No best checkpoint was saved during this training run")
-
+        message = "No best checkpoint was saved during this run."
+        logger.error(message)
+        RuntimeError(message)
+    
     return checkpoint_path
 
 def parse_args() -> argparse.Namespace:

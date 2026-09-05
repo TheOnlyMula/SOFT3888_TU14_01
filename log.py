@@ -41,22 +41,26 @@ def log_command(argv: list[str], log_directory: Path):
 
 def create_logger(name: str, log_directory: Path) -> logging.Logger: 
     logger = logging.getLogger(name)
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
 
-    if logger.handlers: 
-        logger.handlers.clear() 
+    for handler in logger.handlers[:]: 
+        logger.removeHandler(handler)
+        handler.clear() 
 
-    log_format = "%(asctime)s %(levelname)-8s %(message)s"
+    log_format = "%(asctime)s %(levelname)-5s %(message)s"
     date_format = "%Y-%m-%d %H:%M:%S"
     formatter = logging.Formatter(fmt=log_format, datefmt=date_format)
 
     file_handler = logging.FileHandler(
         log_directory / "train.log", 
-        mode="a"
+        mode = "a", 
     )
+    file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(formatter)
 
     console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
     console_handler.setFormatter(formatter)
 
     logger.addHandler(file_handler)

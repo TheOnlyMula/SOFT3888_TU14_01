@@ -50,11 +50,13 @@ def validate_model(
             total_l1_loss += step_l1_loss
             
             if batch_idx_step % 10 == 0 and batch_idx_step > 0:
-                logger.info(f"Val Step [{batch_idx_step}/{len(val_loader)}] "
-                      f"| Val: {step_loss:.4f} "
-                      f"| Box: {step_box_loss:.4f} "
-                      f"| Cls: {step_cls_loss:.4f} "
-                      f"| L1: {step_l1_loss:.4f}")
+                logger.debug(
+                    f"Val Step [{batch_idx_step}/{len(val_loader)}] "
+                    f"| Val: {step_loss:.4f} "
+                    f"| Box: {step_box_loss:.4f} "
+                    f"| Cls: {step_cls_loss:.4f} "
+                    f"| L1: {step_l1_loss:.4f}"
+                )
                 
     num_batches = len(val_loader)
     return (
@@ -73,7 +75,9 @@ def evaluate_test_model(
     logger: logging.Logger, 
 ):
     if not checkpoint_path.is_file():
-        raise FileNotFoundError(f"Best checkpoint not found: {checkpoint_path}")
+        message = f"Best checkpoint not found: {checkpoint_path}"
+        logging.error(message)
+        raise FileNotFoundError(message)
 
     logger.info(f"Loading best weights from {checkpoint_path} into Ultralytics engine...")
     

@@ -2,6 +2,7 @@ import argparse
 from pathlib import Path
 import cv2
 import hdf5plugin  # Required to prevent Blosc decompression error
+import logging
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -107,15 +108,20 @@ def yolo_collate_fn(batch):
 
 def create_rgb_dataloaders(
     dataset_path: Path,
+    logger: logging.Logger, 
     batch_size: int = 4,
     num_workers: int = 0,
 ) -> tuple[DataLoader, DataLoader]:
     """Create reproducible training and validation Dataloaders using explicit sequence splits."""
     if not 1 <= batch_size <= 50:
-        raise ValueError("batch_size must be between 1 and 50")
+        message = "batch_size must be between 1 and 50"
+        logger.error(message)
+        raise ValueError(message)
 
     if num_workers < 0:
-        raise ValueError("num_workers must be non-negative")
+        message = "num_workers must be non-negative"
+        logger.error(message)
+        raise ValueError(message)
     
     train_dataset = DSECFusionDataset(
         dataset_path=dataset_path,
@@ -153,14 +159,19 @@ def create_rgb_dataloaders(
 
 def create_fusion_dataloaders(
     dataset_path: Path,
+    logger: logging.Logger, 
     batch_size: int = 4,
     num_workers: int = 0,
 ) -> tuple[DataLoader, DataLoader]:
     """Create reproducible training and validation Dataloaders for the Fusion Teacher."""
     if not 1 <= batch_size <= 50:
-        raise ValueError("batch_size must be between 1 and 50")
+        message = "batch_size must be between 1 and 50"
+        logger.error(message)
+        raise ValueError(message)
     if num_workers < 0:
-        raise ValueError("num_workers must be non-negative")
+        message = "num_workers must be non-negative"
+        logger.error(message)
+        raise ValueError(message)
     
     train_dataset = DSECFusionDataset(dataset_path=dataset_path, split="train", rgb_only=False)
     val_dataset = DSECFusionDataset(dataset_path=dataset_path, split="val", rgb_only=False)
