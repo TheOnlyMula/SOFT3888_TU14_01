@@ -208,6 +208,11 @@ def parse_args() -> argparse.Namespace:
         "--data-yaml", type=Path, default=default_yaml_path,
         help="Path to the YOLO dataset YAML file.",
     )
+    parser.add_argument( 
+        "--console-level", type = str, default = "INFO",
+        choices = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help = "Set the logging level.",
+    )
     return parser.parse_args()
 
 def main() -> None:
@@ -215,7 +220,11 @@ def main() -> None:
     settings.update({"runs_dir": str(log_directory)})
     args = parse_args()
     
-    logger = log.create_logger("train", log_directory)
+    logger = log.create_logger(
+        "train",
+        log_directory,
+        console_level=args.console_level,
+    )
     log.log_command(sys.argv, log_directory)
     
     device = select_device()
@@ -227,9 +236,10 @@ def main() -> None:
     )
 
     train_loader, val_loader = create_rgb_dataloaders(
-        dataset_path=args.dataset_path,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
+        dataset_path = args.dataset_path,
+        logger = logger, 
+        batch_size = args.batch_size,
+        num_workers = args.num_workers,
     )
 
     optimiser = create_optimiser(model)
@@ -243,7 +253,9 @@ def main() -> None:
         'Sampler': type(train_loader.sampler).__name__, 
         'Number of Workers': train_loader.num_workers, 
         'Pin Memory': train_loader.pin_memory, 
-        'Persistent Workers': train_loader.persistent_workers
+        'Persistent Workers': train_loader.persistent_workers, 
+        'Console Level' : args.console_level, 
+        'Skip Test Evaluation': args.skip_test,
     }
     log.log_model_config(config, log_directory, logger)
     
