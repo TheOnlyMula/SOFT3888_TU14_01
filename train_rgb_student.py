@@ -9,8 +9,13 @@ from types import SimpleNamespace
 from ultralytics import YOLO
 from torch.utils.data import DataLoader
 from ultralytics import settings
-from evaluate import validate_model, evaluate_test_model, _prepare_yolo_batch
-from dataset_loader import create_rgb_dataloaders
+from evaluate import (
+    _prepare_yolo_batch,
+    evaluate_map_model,
+    evaluate_test_model,
+    validate_model,
+)
+from dataset_loader import create_rgb_dataloaders, create_rgb_test_loader
 from utils import (
     select_device, 
     extract_trainable_model, 
@@ -131,7 +136,7 @@ def train_model(
         
         if not math.isfinite(avg_val_batch_loss):
             message = "Non-finite validation loss; cannot select a best checkpoint."
-            logging.error(message)
+            logger.error(message)
             raise ValueError(message)
             
         # Weight saving per epoch (dict containing model and optimiser states)
@@ -182,7 +187,7 @@ def train_model(
     if not checkpoint_path.is_file(): 
         message = "No best checkpoint was saved during this run."
         logger.error(message)
-        RuntimeError(message)
+        raise RuntimeError(message)
     
     return checkpoint_path
 
@@ -278,12 +283,25 @@ def main() -> None:
         logger.info("Test evaluation skipped (--skip-test).")
         return
         
+    test_loader = create_rgb_test_loader(
+        dataset_path=args.dataset_path,
+        logger=logger,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+    )
     evaluate_test_model(
-        checkpoint_path=checkpoint_path, 
-        model_yaml="configs/yolo26n_student.yaml", 
+        test_loader=test_loader,
+        model=model,
+        device=device,
+        logger=logger,
+        checkpoint_path=checkpoint_path,
+    )
+    evaluate_map_model(
+        checkpoint_path=checkpoint_path,
+        model_yaml="configs/yolo26n_student.yaml",
         data_yaml=args.data_yaml,
-        device=device, 
-        logger=logger
+        device=device,
+        logger=logger,
     )
         
 if __name__ == "__main__":

@@ -113,8 +113,8 @@ def create_rgb_dataloaders(
     num_workers: int = 0,
 ) -> tuple[DataLoader, DataLoader]:
     """Create reproducible training and validation Dataloaders using explicit sequence splits."""
-    if not 1 <= batch_size <= 50:
-        message = "batch_size must be between 1 and 50"
+    if not 1 <= batch_size <= 32:
+        message = "batch_size must be between 1 and 32"
         logger.error(message)
         raise ValueError(message)
 
@@ -157,6 +157,45 @@ def create_rgb_dataloaders(
 
     return train_loader, val_loader
 
+def create_rgb_test_loader(
+    dataset_path: Path,
+    logger: logging.Logger,
+    batch_size: int = 4,
+    num_workers: int = 0,
+) -> DataLoader:
+    """Create the dedicated, sequential RGB-only test DataLoader."""
+    if not 1 <= batch_size <= 32:
+        message = "batch_size must be between 1 and 32"
+        logger.error(message)
+        raise ValueError(message)
+
+    if num_workers < 0:
+        message = "num_workers must be non-negative"
+        logger.error(message)
+        raise ValueError(message)
+
+    test_dataset = DSECFusionDataset(
+        dataset_path=dataset_path,
+        split="test",
+        rgb_only=True,
+    )
+    if len(test_dataset) == 0:
+        message = "The test split is empty; provide a labelled test dataset."
+        logger.error(message)
+        raise ValueError(message)
+
+    return DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=num_workers > 0,
+        collate_fn=yolo_collate_fn,
+        drop_last=False,
+    )
+
+
 def create_fusion_dataloaders(
     dataset_path: Path,
     logger: logging.Logger, 
@@ -164,8 +203,8 @@ def create_fusion_dataloaders(
     num_workers: int = 0,
 ) -> tuple[DataLoader, DataLoader]:
     """Create reproducible training and validation Dataloaders for the Fusion Teacher."""
-    if not 1 <= batch_size <= 50:
-        message = "batch_size must be between 1 and 50"
+    if not 1 <= batch_size <= 32:
+        message = "batch_size must be between 1 and 32"
         logger.error(message)
         raise ValueError(message)
     if num_workers < 0:

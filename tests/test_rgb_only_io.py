@@ -46,7 +46,9 @@ class RgbOnlyIoTests(unittest.TestCase):
             "tracks": [], "events": events,
         }
         dataset = DSECFusionDataset(Path("fake"), rgb_only=False)
-        images, histogram, targets = dataset[7]
+        fused, targets = dataset[7]
+        images = fused[:3]
+        histogram = fused[3:]
         base.__getitem__.assert_called_once_with(7)
         base.get_image.assert_not_called()
         base.get_tracks.assert_not_called()
