@@ -2,6 +2,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import torch
 from ultralytics import YOLO
+import yaml
 
 def select_device() -> torch.device:
     """Select CUDA when available; otherwise use CPU."""
@@ -16,7 +17,16 @@ def extract_trainable_model(
     Load a YOLO architecture from a YAML file, load pretrained weights,
     extract the raw PyTorch nn.Module, and prep it for custom training.
     """
+    with open(yaml_path, 'r') as f:
+        cfg = yaml.safe_load(f)
+    ch = cfg.get('ch', 3)
+
     yolo_wrapper = YOLO(str(yaml_path), task="detect")
+    
+    if ch != 3:
+        from ultralytics.nn.tasks import DetectionModel
+        yolo_wrapper.model = DetectionModel(str(yaml_path), ch=ch, nc=cfg.get('nc', 80))
+        
     yolo_wrapper.load(str(weights_path))
     
     dsec_names = {
@@ -65,7 +75,7 @@ def create_optimiser(model: torch.nn.Module) -> torch.optim.Optimizer:
     #)
     return torch.optim.AdamW(
         (parameter for parameter in model.parameters() if parameter.requires_grad),
-        lr=1e-4,
+        lr=3e-4,
         weight_decay=0.0005,
     )
     
@@ -74,7 +84,9 @@ def load_checkpoint(
     checkpoint_path: str | Path, 
     device: torch.device, 
     model: torch.nn.Module, 
-    optimiser: torch.optim.Optimizer
+    optimiser: torch.optim.Optimizer,
+    ema=None,
+    scheduler=None
 ) -> dict:
     """ Load the checkpoint if it exists, otherwise return default values. """
     if not Path(checkpoint_path).is_file():
@@ -82,8 +94,19 @@ def load_checkpoint(
 
     checkpoint = torch.load(checkpoint_path, map_location=device)
 
-    model.load_state_dict(checkpoint["model_state_dict"])
+    if "raw_model_state_dict" in checkpoint:
+        model.load_state_dict(checkpoint["raw_model_state_dict"])
+    else:
+        model.load_state_dict(checkpoint["model_state_dict"])
+        
     optimiser.load_state_dict(checkpoint["optimiser_state_dict"])
+    
+    if ema is not None and "ema_updates" in checkpoint:
+        ema.ema.load_state_dict(checkpoint["model_state_dict"])
+        ema.updates = checkpoint["ema_updates"]
+        
+    if scheduler is not None and "scheduler_state_dict" in checkpoint:
+        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
 
     return {'past_epochs': checkpoint["epoch"], 'latest_val_loss': checkpoint["val_loss"]}
 

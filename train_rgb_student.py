@@ -11,6 +11,8 @@ from torch.utils.data import DataLoader
 from ultralytics import settings
 from evaluate import validate_model, evaluate_test_model, _prepare_yolo_batch
 from dataset_loader import create_rgb_dataloaders
+from ultralytics.utils.torch_utils import ModelEMA
+from torch.optim.lr_scheduler import CosineAnnealingLR
 from utils import (
     select_device, 
     extract_trainable_model, 
@@ -39,8 +41,10 @@ def train_model(
     checkpoint_path = Path(checkpoint_path)
     latest_path = Path(latest_path)
     
-    # Checkpoint logic from the weight-saving branch
-    checkpoint_info = load_checkpoint(latest_path, device, model, optimiser)
+    ema = ModelEMA(model)
+    scheduler = CosineAnnealingLR(optimiser, T_max=total_epochs, eta_min=1e-6)
+    
+    checkpoint_info = load_checkpoint(latest_path, device, model, optimiser, ema, scheduler)
     past_epochs = checkpoint_info["past_epochs"]
     
     if past_epochs >= total_epochs:
@@ -49,11 +53,12 @@ def train_model(
             past_epochs,
             total_epochs,
         )
-        return checkpoint_path
         
     # Get the historical best stats so we only overwrite if we beat the previous best
     best_stats = fetch_best_dict(checkpoint_path, device, model, optimiser, mode = 0)
     best_val_loss = best_stats["best_val_loss"]
+
+    summary_width = 62
 
     step_width = len(str(len(train_loader)))
     epoch_width = len(str(total_epochs))
@@ -78,13 +83,13 @@ def train_model(
             optimiser.zero_grad()
             
             loss, loss_items = model(batch_data)
-            batch_loss = loss.sum()
+            batch_loss = loss.sum() / imgs.shape[0]
             batch_loss.backward()
             
-            # Prevent gradient explosion
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
             
             optimiser.step()
+            ema.update(model)
 
             step_loss = batch_loss.item()
             
@@ -103,7 +108,7 @@ def train_model(
 
             step = batch_idx_step + 1
             if step == 1 or step % 10 == 0 or step == len(train_loader):
-                logger.debug(
+                logger.info(
                     "Batch completed epoch = %d/ %d step = %d/ %d "
                     "loss = %.4f box_loss = %.4f cls_loss = %.4f l1_loss = %.4f",
                     epoch + 1,
@@ -116,6 +121,8 @@ def train_model(
                     step_l1_loss,
                 )
 
+        scheduler.step()
+        
         num_train_batches = len(train_loader)
         avg_train_batch_loss = total_loss / num_train_batches
         avg_train_image_loss = avg_train_batch_loss / train_loader.batch_size
@@ -124,21 +131,25 @@ def train_model(
         avg_train_cls_loss = total_train_cls_loss / num_train_batches
         avg_train_l1_loss = total_train_l1_loss / num_train_batches
         
+        # Validate using the EMA model for smooth, stable metrics
         (avg_val_batch_loss, 
          avg_val_box_loss, 
          avg_val_cls_loss, 
-         avg_val_l1_loss) = validate_model(val_loader, model, device, logger)
+         avg_val_l1_loss) = validate_model(val_loader, ema.ema, device, logger)
         
         if not math.isfinite(avg_val_batch_loss):
             message = "Non-finite validation loss; cannot select a best checkpoint."
             logging.error(message)
             raise ValueError(message)
-            
-        # Weight saving per epoch (dict containing model and optimiser states)
+                    
+        # Weight saving per epoch 
         checkpoint_dict = {
             'epoch': epoch + 1, 
-            'model_state_dict': model.state_dict(), 
+            'model_state_dict': ema.ema.state_dict(), 
+            'raw_model_state_dict': model.state_dict(),
+            'ema_updates': ema.updates,
             'optimiser_state_dict': optimiser.state_dict(), 
+            'scheduler_state_dict': scheduler.state_dict(),
             'val_loss': avg_val_batch_loss
         }
         
@@ -155,7 +166,7 @@ def train_model(
                 best_val_loss,
                 checkpoint_path,
             )
-            
+                        
         avg_val_image_loss = avg_val_batch_loss / val_loader.batch_size
 
         logger.info(
@@ -183,7 +194,7 @@ def train_model(
         message = "No best checkpoint was saved during this run."
         logger.error(message)
         RuntimeError(message)
-    
+
     return checkpoint_path
 
 def parse_args() -> argparse.Namespace:
@@ -224,7 +235,7 @@ def main() -> None:
         "train",
         log_directory,
         console_level=args.console_level,
-    )
+    )    
     log.log_command(sys.argv, log_directory)
     
     device = select_device()
@@ -253,7 +264,7 @@ def main() -> None:
         'Sampler': type(train_loader.sampler).__name__, 
         'Number of Workers': train_loader.num_workers, 
         'Pin Memory': train_loader.pin_memory, 
-        'Persistent Workers': train_loader.persistent_workers, 
+        'Persistent Workers': train_loader.persistent_workers,
         'Console Level' : args.console_level, 
         'Skip Test Evaluation': args.skip_test,
     }
@@ -283,7 +294,11 @@ def main() -> None:
         model_yaml="configs/yolo26n_student.yaml", 
         data_yaml=args.data_yaml,
         device=device, 
-        logger=logger
+        logger=logger,
+        dataset_path=args.dataset_path,
+        rgb_only=True,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers
     )
         
 if __name__ == "__main__":
