@@ -47,13 +47,21 @@ Acts as a PyTorch Dataset loader that visualises and returns:
 
 The script leverages the core `DSECDet` utility with a `sync="back"` configuration. This strictly bundles the RGB image with the 50 milliseconds of event data that occurred *immediately prior* to the camera shutter, satisfying the causal timeline required..
 
-**Usage Instructions**
+## Usage Instructions
 You can run the script directly from your terminal to visualize the synchronized RGB image alongside the generated event histogram, complete with bounding box overlays.
 
 ```bash
 # Basic usage
 python dataset_loader.py --dataset-path "/path/to/your/dataset"
 ```
+Additional arguments for configuring the training run:
+
+* `--batch-size`: Number of images processed together in each training step. Default: `4`.
+* `--num-workers`: Number of worker processes used to load data. Default: `0`.
+* `--epochs`: Number of complete passes through the training data. Default: `1`.
+* `--skip-test`: Skips the final test evaluation after training.
+* `--data-yaml`: Path to the YOLO dataset configuration file. Default: `configs/dsec_rgb.yaml`.
+* `--console-level`: Sets the console logging level, such as `INFO` or `DEBUG`. Default: `INFO`.
 
 ## RGB Student DataLoader
 

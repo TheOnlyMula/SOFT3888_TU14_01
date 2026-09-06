@@ -39,7 +39,11 @@ def log_command(argv: list[str], log_directory: Path):
     with open(log_directory / "run_command.txt", "w") as file: 
         file.write(command)
 
-def create_logger(name: str, log_directory: Path) -> logging.Logger: 
+def create_logger(
+    name: str,
+    log_directory: Path,
+    console_level: str = "INFO",
+) -> logging.Logger:
     logger = logging.getLogger(name)
     logger.setLevel(logging.DEBUG)
     logger.propagate = False
@@ -60,7 +64,7 @@ def create_logger(name: str, log_directory: Path) -> logging.Logger:
     file_handler.setFormatter(formatter)
 
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO)
+    console_handler.setLevel(getattr(logging, console_level.upper()))
     console_handler.setFormatter(formatter)
 
     logger.addHandler(file_handler)
