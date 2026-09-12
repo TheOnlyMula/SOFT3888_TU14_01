@@ -2,14 +2,13 @@ import argparse
 from pathlib import Path
 import cv2
 import hdf5plugin  # Required to prevent Blosc decompression error
-import logging
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 from dsec_det.dataset import DSECDet
 from dsec_det.label import CLASSES, COLORS
 from dsec_det.io import yaml_file_to_dict
-
+import logging
 from ultralytics import YOLO 
 
 
@@ -28,10 +27,9 @@ class DSECFusionDataset(Dataset):
     def __len__(self):
         return len(self.base_dataset)
 
-    def generate_event_histogram(self, events, height=480, width=640):        # Generates a two channel event histogram representation
+    def generate_event_histogram(self, events, height=480, width=640):        
         hist = np.zeros((2, height, width), dtype=np.float32)
 
-        # Check if events exist and if the internal 'x' array actually has data
         if events is not None and len(events.get("x", [])) > 0:
             x = events["x"].astype(int)
             y = events["y"].astype(int)
@@ -41,7 +39,10 @@ class DSECFusionDataset(Dataset):
             np.add.at(hist[0], (y[p == 0], x[p == 0]), 1)
             np.add.at(hist[1], (y[p == 1], x[p == 1]), 1)
 
-        return torch.from_numpy(hist)
+        hist_tensor = torch.from_numpy(hist)
+        # Apply Log Scaling normalization
+        hist_tensor = torch.log1p(hist_tensor)
+        return hist_tensor
 
     def __getitem__(self, idx):
         if self.rgb_only:
@@ -108,7 +109,7 @@ def yolo_collate_fn(batch):
 
 def create_rgb_dataloaders(
     dataset_path: Path,
-    logger: logging.Logger, 
+    logger: logging.Logger,
     batch_size: int = 4,
     num_workers: int = 0,
 ) -> tuple[DataLoader, DataLoader]:
@@ -117,12 +118,12 @@ def create_rgb_dataloaders(
         message = "batch_size must be between 1 and 32"
         logger.error(message)
         raise ValueError(message)
-
+    
     if num_workers < 0:
         message = "num_workers must be non-negative"
         logger.error(message)
         raise ValueError(message)
-    
+        
     train_dataset = DSECFusionDataset(
         dataset_path=dataset_path,
         split="train",
@@ -198,7 +199,7 @@ def create_rgb_test_loader(
 
 def create_fusion_dataloaders(
     dataset_path: Path,
-    logger: logging.Logger, 
+    logger: logging.Logger,
     batch_size: int = 4,
     num_workers: int = 0,
 ) -> tuple[DataLoader, DataLoader]:
@@ -211,7 +212,7 @@ def create_fusion_dataloaders(
         message = "num_workers must be non-negative"
         logger.error(message)
         raise ValueError(message)
-    
+        
     train_dataset = DSECFusionDataset(dataset_path=dataset_path, split="train", rgb_only=False)
     val_dataset = DSECFusionDataset(dataset_path=dataset_path, split="val", rgb_only=False)
 
@@ -236,3 +237,28 @@ def create_fusion_dataloaders(
     )
 
     return train_loader, val_loader
+
+def create_test_dataloader(
+    dataset_path: Path,
+    rgb_only: bool,
+    batch_size: int = 4,
+    num_workers: int = 0,
+) -> DataLoader:
+    """Create reproducible test Dataloader using explicit sequence splits."""
+    if not 1 <= batch_size <= 50:
+        raise ValueError("batch_size must be between 1 and 50")
+    if num_workers < 0:
+        raise ValueError("num_workers must be non-negative")
+    
+    test_dataset = DSECFusionDataset(dataset_path=dataset_path, split="test", rgb_only=rgb_only)
+    
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False, 
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=num_workers > 0,
+        collate_fn=yolo_collate_fn, 
+    )
+    return test_loader

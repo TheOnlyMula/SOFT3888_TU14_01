@@ -1,167 +1,284 @@
 # SOFT3888_TU14_01
 
-## 📚 Project Documentation
+This project will develop an event-privileged training framework using the DSEC-Detection dataset. A teacher model will use paired RGB and event-camera information to perform traffic object detection, while an RGB-only student model will learn from the teacher through knowledge distillation. This approach will investigate whether object-aware distillation can improve the transfer of information from the teacher to the student. The resulting student model will operate independently using RGB input only during inference. 
 
-All core administrative documents and weekly records for this capstone project are hosted in our repository's **[Wiki](https://github.sydney.edu.au/aalf0384/SOFT3888_TU14_01/wiki)**. 
+Our capstone project for SOFT3888 aims to address the drawbacks of RGB cameras in object detection by integrating data from event cameras into model training. If successful, the primary benefit of this approach is detecting objects in traffic more accurately with reduced computational overhead in a more lightweight framework. This allows for faster response times while maintaining accuracy in adequate lighting conditions, and surpassing the accuracy of conventional RGB systems in harsh lighting conditions. 
 
-Please refer to the Wiki for:
-* **Core Documents:** Group Contract.
-* **Meeting Minutes:** Weekly progress records and action items.
+## Repository structure
 
----
-
-## 🛠️ Environment Setup and Installation
-
-Follow these steps to configure your local Python environment to run the project smoothly.
-
-**1. Setting Up the Environment**
-
-Install Miniforge3, then clone the repository
-```bash
-git clone https://github.sydney.edu.au/SOFT3888-TU14-01/SOFT3888_TU14_01.git
-cd SOFT3888-TU14-01
+```text
+SOFT3888_TU14_01/
+├── README.md
+├── dataset_loader.py
+├── train_rgb_student.py
+├── train_teacher.py
+├── evaluate.py
+├── utils.py
+├── log.py
+├── environment.yml
+├── yolo26n.pt
+├── configs/
+│   ├── dsec_rgb.yaml
+│   ├── yolo26n_student.yaml
+│   └── yolo26n_teacher.yaml
+├── DSEC_ROOT/
+│   └── train/
+│       └── ... labelled DSEC sequences ...
+├── DSEC-det/
+│   └── official DSEC detection utilities
+├── runs/
+│   └── training outputs and logs
+├── tests/
+│   └── regression and smoke tests
+├── tools/
+│   └── utilities for exports, diagnostics, and smoke checks
+└── .gitignore
 ```
-Create isolated environment, then activate it
+
+## Core components
+
+### dataset_loader.py
+
+This file defines the DSEC dataset access layer. It creates a custom dataset that:
+
+- reads RGB images from DSEC sequences,
+- optionally reads event tensors from event files,
+- converts event polarity information into a 2-channel histogram,
+- maps labels into YOLO-style bounding box targets,
+- supports both RGB-only and fused RGB + event training paths.
+
+The dataset uses the DSEC detector utilities and a synchronization mode of `sync="back"`, which means each RGB image is paired with the event stream that occurred immediately before the image acquisition, preserving causal ordering.
+
+### train_rgb_student.py
+
+This script trains the student RGB-only YOLO model. It:
+
+- builds a DSEC RGB dataloader for train/validation splits,
+- initialises a YOLO model from the pretrained `yolo26n.pt` checkpoint,
+- trains with a YOLO-style loss,
+- logs training metrics,
+- saves the best validation checkpoint,
+- optionally runs a final test evaluation.
+
+### train_teacher.py
+
+This script trains the teacher model using RGB + event fusion. It follows the same training loop pattern as the student version but loads the fused dataloader, which includes both RGB image channels and the event histogram.
+
+### evaluate.py
+
+This file includes the validation and test evaluation logic used by both training scripts. It:
+
+- validates a checkpoint on a validation loader,
+- computes batch-wise loss summaries,
+- restores a saved checkpoint into the Ultralytics model,
+- evaluates on the DSEC test split,
+- logs loss and metrics for analysis.
+
+### utils.py
+
+This module contains shared utility functions for:
+
+- selecting the correct compute device,
+- extracting trainable layers from the YOLO model,
+- creating the optimizer,
+- loading a checkpoint,
+- reading the best saved checkpoint state.
+
+## Environment setup
+
+The project expects a Python environment with PyTorch, Ultralytics, OpenCV, and the DSEC dataset utilities. The repository includes an environment file.
+
+### 1. Clone the repository
+
+```bash
+git clone <repo-url>
+cd SOFT3888_TU14_01
+```
+
+### 2. Create the environment
 ```bash
 mamba env create -f environment.yml
 mamba activate dsec-env
 ```
 
-**2. Install Utility Packages**
+If you are using conda instead of mamba, the same environment definition should work with `conda env create -f environment.yml`.
 
-We rely on the official DSEC-Detection package to handle the raw dataset files. Clone the repository and install it in editable mode:
+For macOS and Linux systems, you may also use a python env using the following process: 
+```bash
+python -m venv .venv
+source .venv/bin/activate
+```
+This will isolate the current terminal session and run a Python virtual environment. 
+
+### 3. Install the DSEC detection utilities
+
+The repo depends on the external `DSEC-det` package for dataset parsing and labelling support.
+
 ```bash
 git clone https://github.com/uzh-rpg/DSEC-det.git
 cd DSEC-det
 pip install -e .
 ```
 
-## 📊 DSEC Dataset Loader
+Make sure the environment remains active while running the training scripts.
 
-**Purpose**
-Acts as a PyTorch Dataset loader that visualises and returns:
+## Data layout
 
-*   **RGB Images:** Traditional camera frames.
-*   **Event Data:** Asynchronous microsecond level pixel polarity changes, converted into a 2-channel event histogram (positive and negative events).
-*   **Detection Labels:** Bounding box coordinates and classification labels.
-
-The script leverages the core `DSECDet` utility with a `sync="back"` configuration. This strictly bundles the RGB image with the 50 milliseconds of event data that occurred *immediately prior* to the camera shutter, satisfying the causal timeline required..
-
-## Usage Instructions
-You can run the script directly from your terminal to visualize the synchronized RGB image alongside the generated event histogram, complete with bounding box overlays.
-
-```bash
-# Basic usage
-python dataset_loader.py --dataset-path "/path/to/your/dataset"
-```
-Additional arguments for configuring the training run:
-
-* `--batch-size`: Number of images processed together in each training step. Default: `4`.
-* `--num-workers`: Number of worker processes used to load data. Default: `0`.
-* `--epochs`: Number of complete passes through the training data. Default: `1`.
-* `--skip-test`: Skips the final test evaluation after training.
-* `--data-yaml`: Path to the YOLO dataset configuration file. Default: `configs/dsec_rgb.yaml`.
-* `--console-level`: Sets the console logging level, such as `INFO` or `DEBUG`. Default: `INFO`.
-
-## RGB Student DataLoader
-
-`train_rgb_student.py` configures the RGB-only student DataLoader for Issue #9.
-
-The dataset path must point to the DSEC root containing the `train` directory:
+This project expects the DSEC dataset to be available under a root folder such as `DSEC_ROOT`.
 
 ```text
 DSEC_ROOT/
 └── train/
-    └── sequence_name/
+    ├── sequence_01/
+    │   ├── calibration/
+    │   ├── events/
+    │   ├── images/
+    │   └── object_detections/
+    └── sequence_02/
         ├── calibration/
         ├── events/
         ├── images/
         └── object_detections/
+
 ```
 
-Training/validation-only example (no test directory required):
+For the project to work correctly, each sequence should contain the usual DSEC structure, including:
+
+- `images/left/distorted/` for RGB frames
+- `events/` for event files
+- `object_detections/` with tracking label files
+- `timestamps.txt` and corresponding metadata for alignment
+
+The dataset loader uses the DSEC split configuration in `DSEC-det/config/train_val_test_split.yaml` to determine which sequences belong to train, validation, and test subsets.
+
+## Training pipeline
+
+### Student RGB-only training
+
+Run the student model training from the project root:
 
 ```bash
-python train_rgb_student.py --dataset-path "/path/to/DSEC_ROOT" --batch-size 4 --num-workers 4 --skip-test
+python train_rgb_student.py \
+  --dataset-path "/path/to/DSEC_ROOT" \
+  --batch-size 4 \
+  --num-workers 4 \
+  --epochs 1
 ```
 
-Testing Only
+Example with validation-only setup and no final test evaluation:
 
 ```bash
-python train_rgb_student.py --dataset-path "/path/to/DSEC_ROOT" --batch-size 4 --num-workers 4 --test-weights "runs/EXP_XX/best_student_yolo.pt"
+python train_rgb_student.py \
+  --dataset-path "/path/to/DSEC_ROOT" \
+  --batch-size 4 \
+  --num-workers 4 \
+  --epochs 10 \
+  --skip-test
 ```
 
-The script:
+The script does the following:
 
-* Selects CUDA automatically when available, otherwise CPU.
-* Uses `DSECFusionDataset` with `split="train"` and `rgb_only=True`.
-* Enables shuffled loading with `yolo_rgb_collate_fn`.
-* Enables pinned memory.
-* Enables persistent workers when `num_workers` is greater than zero.
+- loads the DSEC RGB-only train and validation sets,
+- shuffles the training data,
+- collates labels into a YOLO-compatible target structure,
+- clips gradients to avoid exploding updates,
+- validates after each epoch,
+- saves the model with the lowest validation loss,
+- runs a final test evaluation unless `--skip-test` is provided.
 
-When using `--num-workers 0`, persistent workers are disabled because PyTorch does not permit persistent workers without worker processes.
+### Teacher RGB + event training
 
-On Windows, use an ASCII-only dataset path where possible because OpenCV may fail to read images from paths containing non-ASCII characters.
+The teacher training uses the fused dataloader and the same overall training pattern, but adds event information to the input tensor.
 
-Run the unit tests with:
+```bash
+python train_teacher.py \
+  --dataset-path "/path/to/DSEC_ROOT" \
+  --batch-size 4 \
+  --num-workers 0 \
+  --epochs 1
+```
+
+This path uses the event histogram generated from event polarity, stacking it alongside RGB features before feeding the model.
+
+## Evaluation workflow
+
+The evaluation code is built around the YOLO detection model and uses DSEC test data. The repository saves training logs under `runs/` and stores checkpoints alongside the training logs.
+
+### Validation metric logic
+
+During training, validation is performed using a model in evaluation mode and `torch.no_grad()`. The script computes:
+
+- average validation batch loss,
+- average validation box loss,
+- average validation classification loss,
+- average validation L1 loss.
+
+The best checkpoint is selected using the lowest validation batch loss.
+
+### Test evaluation command
+
+```bash
+python evaluate.py \
+  --weights "/path/to/checkpoint.pt" \
+  --type student \
+  --dataset-path "/path/to/DSEC_ROOT" \
+  --batch-size 16 \
+  --num-workers 8
+```
+
+The `--type` argument determines which model config is used:
+
+- `student` -> `configs/yolo26n_student.yaml`
+- `teacher` -> `configs/yolo26n_teacher.yaml`
+
+The evaluation loads the saved PyTorch checkpoint state, restores it into the Ultralytics model, and validates it on the test split.
+
+## Dataset and training notes
+
+- The project uses a deterministic split based on the official DSEC configuration file.
+- Training and validation are both performed on labelled subsets, while test evaluation is reserved for final measurement.
+- The code expects a valid DSEC root path with all required subdirectories aligned to the same sequence ID.
+- On Windows, prefer ASCII-only dataset paths when possible because OpenCV and some file-handling utilities can sometimes fail on non-ASCII characters.
+- The training pipeline saves both a best checkpoint and a latest checkpoint, so progress can resume if a run is interrupted.
+
+## Testing and validation
+
+Run the unit and integration checks from the repository root:
 
 ```bash
 python -m unittest discover -s tests -v
 ```
-## RGB Image Degradation
-The script randomly darkens or overexposes each RGB image, then saves the degraded images into a separate output directory while preserving the original DSEC sequence structure.
 
-Training split example:
+The test suite covers the project’s expected data-loading and training workflow behaviour.
 
-```bash
-python RGB_image_Degradatoin.py --dataset-path "/path/to/DSEC_ROOT" --split train --output-path "/path/to/degraded_data"
-```
+## Smoke checks and diagnostics
 
-Testing split example:
-
-```bash
-python RGB_image_Degradatoin.py --dataset-path "/path/to/DSEC_ROOT" --split test --output-path "/path/to/degraded_data"
-```
-
-The script:
-
-Loads RGB images from images/left/distorted.
-Randomly applies either darkening or overexposure.
-Keeps the original images unchanged.
-Saves degraded images into the selected output directory.
-Preserves the original split, sequence, and image directory structure.
-
-## Post-training test evaluation
-
-Training retains the existing seed-42 80/20 train/validation split and two epochs. The model with the lowest validation batch loss is saved as `best_student_yolo.pt`. After training, it is restored and evaluated on `split="test"` with `shuffle=False`, `drop_last=False`, `model.eval()`, and `torch.no_grad()`.
-
-Provide separate labelled `train/` and `test/` directories. Each sequence needs `images/timestamps.txt`, `images/left/distorted/*.png`, and `object_detections/left/tracks.npy`, with aligned filenames, timestamps, and labels. RGB-only loading does not require event files; RGB+event mode still does. Do not use test sequences for training, validation, or model tuning.
-
-Run from the repository root with the project virtual environment:
-
-```powershell
-.\.venv\Scripts\python.exe train_rgb_student.py --dataset-path "D:\DSEC_ROOT" --batch-size 4 --num-workers 0
-```
-
-Append `--skip-test` for training/validation ONLY when no test split is available.
-
-The checkpoint is a PyTorch `state_dict` for the same model architecture, not an Ultralytics model archive. Use only trusted checkpoints. Loading failures, empty test data, or nonfinite losses stop evaluation without a final test summary.
-
-The console prints the loaded checkpoint, sample/batch counts, and:
-
-- **Average test batch loss:** total batch loss divided by processed batches.
-- **Average test per-image loss:** total batch loss divided by processed images.
-
-Batch loss is `loss.sum().item()`. Actual image counts include a partial last batch. These values are loss summaries, not mAP, precision, or recall.
-
-Install the dependencies in `requirements.txt` and DSEC-Detection in the same environment. Last verified on Windows/CPU with Python 3.14.7; fresh installations and CUDA have not been verified. Run the unit-test command above after changes.
-
-### Small integration check
-
-Use a prepared small labelled subset and a **new** output directory:
+The repository also includes helper workflows for quick integration verification. For example:
 
 ```powershell
 .\.venv\Scripts\python.exe tools/run_issue17_smoke.py --dataset-root "D:\DSEC_ROOT" --output-dir "D:\DSEC_issue17_verify"
 ```
 
-The helper uses 16 training and 4 validation samples, then evaluates **every** sample in the supplied test split. It records versions and selected indices in `run_metadata.json`, and measured losses/checkpoint verification in `test_results.json`. Keep datasets, weights, checkpoints, and logs out of Git. This checks integration, not full-dataset performance or generalisation; confirm the team's split provenance before reporting formal results.
+This test is designed to validate a reduced subset of the pipeline without requiring a full training run across the whole dataset.
+
+## Expected outputs
+
+Typical outputs include:
+
+- training logs in `runs/`
+- best validation checkpoints such as `best_student_yolo.pt`
+- latest checkpoints for resume support
+- evaluation logs that report the loss values used for model selection
+- test results generated by the evaluation pipeline
+
+## Troubleshooting
+
+If training or evaluation fails, check the following first:
+
+1. Ensure the dataset path points to the correct DSEC root.
+2. Confirm that `DSEC-det` is installed in the active environment.
+3. Confirm `train/val/test` directories are populated and labelled correctly.
+4. Ensure the checkpoint path and YAML config path are valid.
+5. Check that the environment matches the required Python and dependency versions.
+
+This project is meant to serve as a full training and evaluation workflow for DSEC-based RGB and RGB + event detection experiments. It is especially useful for experimenting with student–teacher knowledge transfer and multi-modal perception pipelines in a structured and reproducible setup.

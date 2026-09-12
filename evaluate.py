@@ -6,6 +6,28 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 from ultralytics import YOLO
+from dataset_loader import create_test_dataloader
+
+class ValLoaderWrapper:
+    def __init__(self, loader):
+        self.loader = loader
+        self.dataset = loader.dataset
+    def __iter__(self):
+        for imgs, targets in self.loader:
+            B = imgs.shape[0]
+            H, W = imgs.shape[2], imgs.shape[3]
+            yield {
+                'img': imgs * 255,
+                'bboxes': targets[:, 2:],
+                'cls': targets[:, 1:2],
+                'batch_idx': targets[:, 0],
+                'im_file': [f"dummy_{i}.png" for i in range(B)],
+                'ori_shape': [(H, W)] * B,
+                'resized_shape': [(H, W)] * B,
+                'ratio_pad': [((1.0, 1.0), (0.0, 0.0))] * B
+            }
+    def __len__(self):
+        return len(self.loader)
 
 
 def _prepare_yolo_batch(imgs, targets, device):
@@ -144,7 +166,11 @@ def evaluate_map_model(
     model_yaml: Path | str,
     data_yaml: Path | str,
     device: torch.device,
-    logger: logging.Logger,
+    logger: logging.Logger, 
+    dataset_path: Path = None,
+    rgb_only: bool = False,
+    batch_size: int = 16,
+    num_workers: int = 4
 ):
     """Run Ultralytics mAP evaluation on the configured test split."""
     checkpoint_path = Path(checkpoint_path)
@@ -153,37 +179,55 @@ def evaluate_map_model(
         logger.error(message)
         raise FileNotFoundError(message)
 
-    logger.info("Loading best weights for mAP evaluation: %s", checkpoint_path)
-    yolo_model = YOLO(str(model_yaml), task="detect")
-    yolo_model.model.names = {
-        0: "pedestrian",
-        1: "rider",
-        2: "car",
-        3: "bus",
-        4: "truck",
-        5: "bicycle",
-        6: "motorcycle",
-        7: "train",
+    logger.info(f"Loading best weights from {checkpoint_path} into Ultralytics engine...")
+    
+    import yaml
+    with open(model_yaml, 'r') as f:
+        cfg = yaml.safe_load(f)
+    ch = cfg.get('ch', 3)
+
+    yolo_model = YOLO(str(model_yaml), task="detect") 
+    if ch != 3:
+        from ultralytics.nn.tasks import DetectionModel
+        yolo_model.model = DetectionModel(str(model_yaml), ch=ch, nc=cfg.get('nc', 80))
+    
+    dsec_names = {
+        0: 'pedestrian', 1: 'rider', 2: 'car', 3: 'bus', 
+        4: 'truck', 5: 'bicycle', 6: 'motorcycle', 7: 'train'
     }
-
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
-    yolo_model.model.load_state_dict(checkpoint["model_state_dict"])
-
-    logger.info("Starting mAP evaluation on the test split")
-    metrics = yolo_model.val(
-        data=str(data_yaml),
-        split="test",
-        device=str(device),
-        plots=True,
-    )
-    logger.info("Test mAP@50: %.4f", metrics.box.map50)
-    logger.info("Test mAP@50-95: %.4f", metrics.box.map)
+    yolo_model.model.names = dsec_names
+    
+    custom_checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    yolo_model.model.load_state_dict(custom_checkpoint["model_state_dict"])
+    
+    logger.info("Starting mAP evaluation on the test split...")
+    
+    validator = yolo_model.task_map["detect"]["validator"](args={'data': str(data_yaml), 'split': 'test', 'device': str(device)})
+    
+    if dataset_path is not None:
+        test_loader = create_test_dataloader(dataset_path, rgb_only=rgb_only, batch_size=batch_size, num_workers=num_workers)
+        validator.dataloader = ValLoaderWrapper(test_loader)
+        
+    import ultralytics.nn.autobackend
+    ultralytics.nn.autobackend.AutoBackend.warmup = lambda *args, **kwargs: None
+    validator(model=yolo_model.model)
+    metrics = validator.metrics
+    
+    logger.info(f"Test mAP@50: {metrics.box.map50:.4f}")
+    logger.info(f"Test mAP@50-95: {metrics.box.map:.4f}")
     return metrics
 
 
 if __name__ == "__main__":
     import log
     import sys
+    
+    parser = argparse.ArgumentParser(description="Evaluate a trained YOLO model.")
+    parser.add_argument("--weights", type=Path, required=True, help="Path to the trained weights (.pt)")
+    parser.add_argument("--type", type=str, required=True, choices=["student", "teacher"], help="Evaluating student or teacher")
+    parser.add_argument("--dataset-path", type=Path, required=True, help="Path to the dataset directory")
+    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--num-workers", type=int, default=8)
 
     parser = argparse.ArgumentParser(description="Evaluate a trained YOLO model.")
     parser.add_argument(
@@ -209,5 +253,15 @@ if __name__ == "__main__":
     logger = log.create_logger("evaluate", log_directory)
     log.log_command(sys.argv, log_directory)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    evaluate_map_model(args.weights, model_yaml, data_yaml, device, logger)
+    
+    evaluate_test_model(
+        args.weights, 
+        model_yaml, 
+        data_yaml, 
+        device, 
+        logger,
+        dataset_path=args.dataset_path,
+        rgb_only=(args.type == "student"),
+        batch_size=args.batch_size,
+        num_workers=args.num_workers
+    )
