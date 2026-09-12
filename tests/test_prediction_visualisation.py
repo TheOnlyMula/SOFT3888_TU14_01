@@ -6,7 +6,7 @@ from unittest.mock import patch
 import numpy as np
 import torch
 
-from predict_visualise import (
+from tools.prediction_visualisation import (
     GROUND_TRUTH_COLOUR,
     PREDICTION_COLOUR,
     annotate_sample,
@@ -95,7 +95,7 @@ class CheckpointTests(unittest.TestCase):
     def _load(self, path):
         fresh = FakeModel()
         fresh.train()
-        with patch("predict_visualise.extract_trainable_model", return_value=fresh):
+        with patch("tools.prediction_visualisation.extract_trainable_model", return_value=fresh):
             return load_student_model(path, "dummy.pt", torch.device("cpu"))
 
     def test_training_checkpoint_is_restored_in_eval_mode(self):

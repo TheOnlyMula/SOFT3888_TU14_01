@@ -9,11 +9,8 @@ from ultralytics.utils.nms import non_max_suppression
 from dsec_det.label import CLASSES
 
 import log
-from train_rgb_student import (
-    create_rgb_test_loader,
-    extract_trainable_model,
-    select_device,
-)
+from dataset_loader import create_rgb_test_loader
+from utils import extract_trainable_model, select_device
 
 # OpenCV draws in BGR.
 PREDICTION_COLOUR = (0, 0, 255)
@@ -30,7 +27,12 @@ def pad_to_stride(imgs, stride=32):
 
 def load_student_model(checkpoint_path, weights_path, device):
     """Rebuild the student and restore the trained weights in eval mode."""
-    model = extract_trainable_model(weights_path, device=str(device))
+    model_yaml = Path(__file__).resolve().parents[1] / "configs" / "yolo26n_student.yaml"
+    model = extract_trainable_model(
+        yaml_path=model_yaml,
+        weights_path=weights_path,
+        device=device,
+    )
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
     # Handles both the {'model_state_dict': ...} wrapper and a bare state_dict.
     model.load_state_dict(checkpoint.get("model_state_dict", checkpoint))
@@ -146,13 +148,19 @@ def main():
     if args.checkpoint is None:
         args.checkpoint = get_latest_checkpoint("best_student_yolo.pt")
 
+    log_directory = log.create_log_directory("student")
+    logger = log.create_logger("visualise", log_directory)
     device = select_device()
-    print(f"Device: {device}")
+    logger.info("Device: %s", device)
     
     model = load_student_model(args.checkpoint, args.weights, device)
-    print(f"Loaded checkpoint: {args.checkpoint}")
+    logger.info("Loaded checkpoint: %s", args.checkpoint)
 
-    test_loader = create_rgb_test_loader(args.dataset_path, args.batch_size)
+    test_loader = create_rgb_test_loader(
+        dataset_path=args.dataset_path,
+        logger=logger,
+        batch_size=args.batch_size,
+    )
     output_directory = args.checkpoint.parent / "predictions"
     visualise_batches(test_loader, model, device, output_directory, args.num_batches)
 

@@ -1,7 +1,9 @@
 import argparse
 import logging
-import torch
+import math
 from pathlib import Path
+
+import torch
 from torch.utils.data import DataLoader
 from ultralytics import YOLO
 from dataset_loader import create_test_dataloader
@@ -27,6 +29,7 @@ class ValLoaderWrapper:
     def __len__(self):
         return len(self.loader)
 
+
 def _prepare_yolo_batch(imgs, targets, device):
     """Move a collated batch to the device and expose YOLO's target fields."""
     imgs = imgs.to(device)
@@ -38,59 +41,128 @@ def _prepare_yolo_batch(imgs, targets, device):
         "batch_idx": targets[:, 0],
     }
 
+
 def validate_model(
-        val_loader: DataLoader,
-        model: torch.nn.Module,
-        device: torch.device,
-        logger: logging.Logger
-    ) -> tuple[float, float, float, float]:
-    
+    val_loader: DataLoader,
+    model: torch.nn.Module,
+    device: torch.device,
+    logger: logging.Logger,
+) -> tuple[float, float, float, float]:
+    """Evaluate validation loss without updating model weights."""
+    if len(val_loader) == 0:
+        message = "Validation loader must be non-empty."
+        logger.error(message)
+        raise ValueError(message)
+
     model.eval()
     total_loss = 0.0
     total_box_loss = 0.0
     total_cls_loss = 0.0
     total_l1_loss = 0.0
-    logger.info("Starting Validation...")
-    
+    logger.info("Starting validation")
+
     with torch.no_grad():
-        for batch_idx_step, (imgs, targets) in enumerate(val_loader):
+        for batch_index, (imgs, targets) in enumerate(val_loader):
             loss, loss_items = model(_prepare_yolo_batch(imgs, targets, device))
-            
+
             step_loss = loss.sum().item()
-            
-            step_box_loss = loss_items['box_loss']
-            step_cls_loss = loss_items['cls_loss']
-            step_l1_loss = loss_items['l1_loss']
-            
-            if isinstance(step_box_loss, torch.Tensor): step_box_loss = step_box_loss.item()
-            if isinstance(step_cls_loss, torch.Tensor): step_cls_loss = step_cls_loss.item()
-            if isinstance(step_l1_loss, torch.Tensor): step_l1_loss = step_l1_loss.item()
-            
+            step_box_loss = float(loss_items["box_loss"])
+            step_cls_loss = float(loss_items["cls_loss"])
+            step_l1_loss = float(loss_items["l1_loss"])
+
             total_loss += step_loss
             total_box_loss += step_box_loss
             total_cls_loss += step_cls_loss
             total_l1_loss += step_l1_loss
-            
-            if batch_idx_step % 10 == 0 and batch_idx_step > 0:
+
+            if batch_index > 0 and batch_index % 10 == 0:
                 logger.debug(
-                    f"Val Step [{batch_idx_step}/{len(val_loader)}] "
-                    f"| Val: {step_loss:.4f} "
-                    f"| Box: {step_box_loss:.4f} "
-                    f"| Cls: {step_cls_loss:.4f} "
-                    f"| L1: {step_l1_loss:.4f}"
+                    "Validation batch completed step = %d/%d "
+                    "loss = %.4f box_loss = %.4f cls_loss = %.4f l1_loss = %.4f",
+                    batch_index,
+                    len(val_loader),
+                    step_loss,
+                    step_box_loss,
+                    step_cls_loss,
+                    step_l1_loss,
                 )
-                
+
     num_batches = len(val_loader)
     return (
-        total_loss / num_batches, 
-        total_box_loss / num_batches, 
-        total_cls_loss / num_batches, 
-        total_l1_loss / num_batches
+        total_loss / num_batches,
+        total_box_loss / num_batches,
+        total_cls_loss / num_batches,
+        total_l1_loss / num_batches,
     )
 
 
 def evaluate_test_model(
-    checkpoint_path: Path, 
+    test_loader: DataLoader,
+    model: torch.nn.Module,
+    device: torch.device,
+    logger: logging.Logger,
+    checkpoint_path: Path,
+) -> tuple[float, float]:
+    """Restore the best checkpoint and report average test loss."""
+    checkpoint_path = Path(checkpoint_path)
+    if not checkpoint_path.is_file():
+        message = f"Best checkpoint not found: {checkpoint_path}"
+        logger.error(message)
+        raise FileNotFoundError(message)
+
+    if len(test_loader) == 0:
+        message = "The test loader is empty; no test loss can be calculated."
+        logger.error(message)
+        raise ValueError(message)
+
+    model.to(device)
+    try:
+        checkpoint = torch.load(
+            checkpoint_path,
+            map_location=device,
+            weights_only=True,
+        )
+        state_dict = checkpoint.get("model_state_dict", checkpoint)
+        model.load_state_dict(state_dict, strict=True)
+    except Exception as exc:
+        message = f"Could not load the best checkpoint: {checkpoint_path}"
+        logger.error(message)
+        raise RuntimeError(message) from exc
+
+    model.eval()
+    total_loss = 0.0
+    total_batches = 0
+    total_images = 0
+    logger.info("Loaded best checkpoint: %s", checkpoint_path)
+
+    with torch.no_grad():
+        for imgs, targets in test_loader:
+            loss, _ = model(_prepare_yolo_batch(imgs, targets, device))
+            batch_loss = loss.sum().item()
+            if not math.isfinite(batch_loss):
+                message = "Non-finite test loss; no valid test summary is available."
+                logger.error(message)
+                raise ValueError(message)
+
+            total_loss += batch_loss
+            total_batches += 1
+            total_images += imgs.size(0)
+
+    if total_batches == 0 or total_images == 0:
+        message = "No test images were evaluated."
+        logger.error(message)
+        raise ValueError(message)
+
+    avg_test_batch_loss = total_loss / total_batches
+    avg_test_image_loss = total_loss / total_images
+    logger.info("Test samples: %d | Test batches: %d", total_images, total_batches)
+    logger.info("Average test batch loss: %.4f", avg_test_batch_loss)
+    logger.info("Average test per-image loss: %.4f", avg_test_image_loss)
+    return avg_test_batch_loss, avg_test_image_loss
+
+
+def evaluate_map_model(
+    checkpoint_path: Path,
     model_yaml: Path | str,
     data_yaml: Path | str,
     device: torch.device,
@@ -100,9 +172,11 @@ def evaluate_test_model(
     batch_size: int = 16,
     num_workers: int = 4
 ):
+    """Run Ultralytics mAP evaluation on the configured test split."""
+    checkpoint_path = Path(checkpoint_path)
     if not checkpoint_path.is_file():
         message = f"Best checkpoint not found: {checkpoint_path}"
-        logging.error(message)
+        logger.error(message)
         raise FileNotFoundError(message)
 
     logger.info(f"Loading best weights from {checkpoint_path} into Ultralytics engine...")
@@ -141,7 +215,6 @@ def evaluate_test_model(
     
     logger.info(f"Test mAP@50: {metrics.box.map50:.4f}")
     logger.info(f"Test mAP@50-95: {metrics.box.map:.4f}")
-    
     return metrics
 
 
@@ -156,16 +229,29 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--num-workers", type=int, default=8)
 
+    parser = argparse.ArgumentParser(description="Evaluate a trained YOLO model.")
+    parser.add_argument(
+        "--weights",
+        type=Path,
+        required=True,
+        help="Path to the trained weights (.pt)",
+    )
+    parser.add_argument(
+        "--type",
+        type=str,
+        required=True,
+        choices=["student", "teacher"],
+        help="Evaluating student or teacher",
+    )
     args = parser.parse_args()
+
     script_dir = Path(__file__).resolve().parent
-    
-    data_yaml = script_dir / "configs" / "dsec_rgb.yaml" 
-    model_yaml = script_dir / "configs" / f"yolo26n_{args.type}.yaml"  
-    
+    data_yaml = script_dir / "configs" / "dsec_rgb.yaml"
+    model_yaml = script_dir / "configs" / f"yolo26n_{args.type}.yaml"
+
     log_directory = log.create_log_directory(args.type)
     logger = log.create_logger("evaluate", log_directory)
     log.log_command(sys.argv, log_directory)
-    
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     evaluate_test_model(
