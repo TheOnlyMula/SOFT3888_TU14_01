@@ -10,7 +10,7 @@ from ultralytics import YOLO
 from torch.utils.data import DataLoader
 from ultralytics import settings
 from evaluate import validate_model, evaluate_test_model, _prepare_yolo_batch, evaluate_map_model
-from dataset_loader import create_rgb_test_loader
+from dataset_loader import create_rgb_test_loader, create_rgb_dataloaders
 from ultralytics.utils.torch_utils import ModelEMA
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from utils import (
