@@ -10,6 +10,7 @@ Our capstone project for SOFT3888 aims to address the drawbacks of RGB cameras i
 SOFT3888_TU14_01/
 ├── README.md
 ├── dataset_loader.py
+├── training.py
 ├── train_rgb_student.py
 ├── train_teacher.py
 ├── evaluate.py
@@ -17,10 +18,6 @@ SOFT3888_TU14_01/
 ├── log.py
 ├── environment.yml
 ├── yolo26n.pt
-├── configs/
-│   ├── dsec_rgb.yaml
-│   ├── yolo26n_student.yaml
-│   └── yolo26n_teacher.yaml
 ├── DSEC_ROOT/
 │   └── train/
 │       └── ... labelled DSEC sequences ...
@@ -47,11 +44,11 @@ This file defines the DSEC dataset access layer. It creates a custom dataset tha
 - maps labels into YOLO-style bounding box targets,
 - supports both RGB-only and fused RGB + event training paths.
 
-The dataset uses the DSEC detector utilities and a synchronization mode of `sync="back"`, which means each RGB image is paired with the event stream that occurred immediately before the image acquisition, preserving causal ordering.
+Images and labels come from the DSEC detector utilities. For real-time detection, each RGB image is paired only with events from the 50 ms *before* its timestamp (`load_causal_events` in `dataset_loader.py`), so the model never sees events that happen after the image. DSECDet's own `sync` windows are not used for events: `sync="back"` returns the 50 ms after the image, and `sync="front"` pairs the image with the previous frame's labels. The first frame of each sequence has no preceding events, so its event channels are empty.
 
-### train_rgb_student.py
+### training.py
 
-This script trains the student RGB-only YOLO model. It:
+The shared training pipeline used by both models. It:
 
 - builds a DSEC RGB dataloader for train/validation splits,
 - initialises a YOLO model from the pretrained `yolo26n.pt` checkpoint,
@@ -60,19 +57,23 @@ This script trains the student RGB-only YOLO model. It:
 - saves the best validation checkpoint,
 - optionally runs a final test evaluation.
 
-### train_teacher.py
+### train_rgb_student.py and train_teacher.py
 
-This script trains the teacher model using RGB + event fusion. It follows the same training loop pattern as the student version but loads the fused dataloader, which includes both RGB image channels and the event histogram.
+Thin entry points into `training.py`. The two models are trained identically; the only difference is the input:
+
+- `train_rgb_student.py`: 3 channels (RGB).
+- `train_teacher.py`: 5 channels (RGB + 2-channel event histogram).
+
+Both accept the same arguments (`--dataset-path`, `--epochs`, `--batch-size`, `--num-workers`, `--max-samples`, `--skip-test`, `--console-level`).
 
 ### evaluate.py
 
-This file includes the validation and test evaluation logic used by both training scripts. It:
+This file holds the evaluation used for both per-epoch validation and the final test step, so validation and test numbers are computed identically. In a single pass over the data it:
 
-- validates a checkpoint on a validation loader,
-- computes batch-wise loss summaries,
-- restores a saved checkpoint into the Ultralytics model,
-- evaluates on the DSEC test split,
-- logs loss and metrics for analysis.
+- computes the per-image loss (box, class, L1),
+- computes precision, recall, mAP@0.5, mAP@0.5:0.95 and class-agnostic mAP@0.5 (all classes merged, to separate missed objects from wrong classes),
+- reports per-class results,
+- for the test step, restores the best checkpoint and saves the confusion matrix, PR curves and example predictions to `runs/<role>/exp_NNN/test/`.
 
 ### utils.py
 
@@ -188,7 +189,7 @@ The script does the following:
 
 ### Teacher RGB + event training
 
-The teacher training uses the fused dataloader and the same overall training pattern, but adds event information to the input tensor.
+The teacher runs exactly the same pipeline as the student (training, validation, test loss and mAP), but its input tensor also contains the event histogram.
 
 ```bash
 python train_teacher.py \
@@ -226,12 +227,12 @@ python evaluate.py \
   --num-workers 8
 ```
 
-The `--type` argument determines which model config is used:
+Both models use the stock Ultralytics YOLO26n architecture with an 8-class DSEC head (built by `build_model` in `utils.py`). The `--type` argument sets the number of input channels:
 
-- `student` -> `configs/yolo26n_student.yaml`
-- `teacher` -> `configs/yolo26n_teacher.yaml`
+- `student` -> 3 channels (RGB)
+- `teacher` -> 5 channels (RGB + 2 event histogram channels)
 
-The evaluation loads the saved PyTorch checkpoint state, restores it into the Ultralytics model, and validates it on the test split.
+The evaluation loads the saved checkpoint and evaluates it on the test split with the same function used during training, writing metrics to the log and plots to the run's `test/` folder.
 
 ## Dataset and training notes
 

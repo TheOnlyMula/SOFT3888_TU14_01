@@ -3,13 +3,16 @@ import numpy as np
 import cv2
 import argparse
 import torch
-import yaml
+import sys
 import hdf5plugin  # Required to prevent Blosc decompression error
 
 from ultralytics import YOLO
-from ultralytics.nn.tasks import DetectionModel
 from dsec_det.dataset import DSECDet
 from dsec_det.visualize import render_object_detections_on_image 
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from utils import build_model
+from dataset_loader import load_causal_events
 
 def create_video_writer(output_path, fps, width, height):
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
@@ -37,20 +40,9 @@ def generate_event_histogram(events, height=480, width=640):
     hist_tensor = torch.log1p(hist_tensor)
     return hist_tensor
 
-def load_yolo_model(weights_path, model_yaml_path, device, num_classes=8):
-    with open(model_yaml_path, 'r') as f:
-        cfg = yaml.safe_load(f)
-    ch = cfg.get('ch', 3)
-    
-    model = YOLO(str(model_yaml_path), task="detect")
-    if ch != 3:
-        model.model = DetectionModel(str(model_yaml_path), ch=ch, nc=cfg.get('nc', num_classes))
-        
-    dsec_names = {
-        0: 'pedestrian', 1: 'rider', 2: 'car', 3: 'bus', 
-        4: 'truck', 5: 'bicycle', 6: 'motorcycle', 7: 'train'
-    }
-    model.model.names = dsec_names
+def load_yolo_model(weights_path, ch, device):
+    model = YOLO("yolo26n.yaml", task="detect")
+    model.model = build_model(ch)
     
     checkpoint = torch.load(weights_path, map_location=device, weights_only=True)
     state_dict = checkpoint["model_state_dict"] if "model_state_dict" in checkpoint else checkpoint
@@ -79,18 +71,12 @@ if __name__ == '__main__':
     student_model = None
     if args.student_weights is not None:
         print(f"Loading Student model from {args.student_weights}...")
-        student_yaml = script_dir.parent / "configs" / "yolo26n_student.yaml"
-        if not student_yaml.is_file():
-            student_yaml = script_dir / "configs" / "yolo26n_student.yaml"
-        student_model, _ = load_yolo_model(args.student_weights, student_yaml, device)
+        student_model, _ = load_yolo_model(args.student_weights, 3, device)
     
     teacher_model = None
     if args.teacher_weights is not None:
         print(f"Loading Teacher model from {args.teacher_weights}...")
-        teacher_yaml = script_dir.parent / "configs" / "yolo26n_teacher.yaml"
-        if not teacher_yaml.is_file():
-            teacher_yaml = script_dir / "configs" / "yolo26n_teacher.yaml"
-        teacher_model, _ = load_yolo_model(args.teacher_weights, teacher_yaml, device)
+        teacher_model, _ = load_yolo_model(args.teacher_weights, 5, device)
         
     print("Models successfully loaded!")
     
@@ -121,10 +107,9 @@ if __name__ == '__main__':
     for i in range(num_frames_in_seq):
         current_global_idx = global_start_idx + i
         
-        sample = dataset[current_global_idx]
-        img_raw = sample["image"].copy()
-        tracks = sample["tracks"]
-        events = sample.get("events")
+        img_raw = dataset.get_image(current_global_idx).copy()
+        tracks = dataset.get_tracks(current_global_idx)
+        events = load_causal_events(dataset, current_global_idx) if teacher_model is not None else None
         
         if len(img_raw.shape) == 2:
             img_raw = cv2.cvtColor(img_raw, cv2.COLOR_GRAY2BGR)
@@ -149,7 +134,9 @@ if __name__ == '__main__':
         # Teacher Prediction (Fusion)
         img_teacher = None
         if teacher_model is not None:
-            img_tensor = torch.from_numpy(img_raw).permute(2, 0, 1).float() / 255.0
+            # The teacher is trained on RGB; cv2 frames are BGR.
+            img_rgb = cv2.cvtColor(img_raw, cv2.COLOR_BGR2RGB)
+            img_tensor = torch.from_numpy(img_rgb).permute(2, 0, 1).float() / 255.0
             event_tensor = generate_event_histogram(events, height=img_raw.shape[0], width=img_raw.shape[1])
             fused_tensor = torch.cat((img_tensor, event_tensor), dim=0).unsqueeze(0).to(device)
             

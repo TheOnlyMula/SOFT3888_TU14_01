@@ -7,15 +7,16 @@ from unittest.mock import MagicMock, call, patch
 import torch
 from torch.utils.data import RandomSampler, SequentialSampler
 
-from dataset_loader import yolo_collate_fn
-from train_rgb_student import (
+from dataset_loader import limit_dataset, yolo_collate_fn
+from utils import DSEC_NAMES, build_model, set_loss_schedule
+from dataset_loader import create_rgb_dataloaders
+from evaluate import validate_model
+from utils import (
     create_optimiser,
-    create_rgb_dataloaders,
     extract_trainable_model,
     fetch_best_dict,
     load_checkpoint,
     select_device,
-    validate_model,
 )
 
 
@@ -60,6 +61,14 @@ class TrainRgbStudentTests(unittest.TestCase):
             ],
         )
 
+    def test_limit_dataset_spreads_samples_across_the_split(self):
+        dataset = list(range(100))
+        self.assertIs(limit_dataset(dataset, None), dataset)
+        self.assertIs(limit_dataset(dataset, 500), dataset)
+        self.assertEqual(limit_dataset(dataset, 4).indices, [0, 25, 50, 75])
+        with self.assertRaises(ValueError):
+            limit_dataset(dataset, 0)
+
     def test_invalid_dataloader_configuration_is_logged(self):
         logger = MagicMock()
         for kwargs in ({"batch_size": 0}, {"batch_size": 33}, {"num_workers": -1}):
@@ -67,8 +76,8 @@ class TrainRgbStudentTests(unittest.TestCase):
                 create_rgb_dataloaders(Path("fake"), logger=logger, **kwargs)
         self.assertEqual(logger.error.call_count, 3)
 
-    @patch("utils.YOLO")
-    def test_extract_trainable_model(self, mock_yolo_class):
+    @patch("utils.build_model")
+    def test_extract_trainable_model(self, mock_build_model):
         model = MagicMock(spec=torch.nn.Module)
         parameters = [
             torch.nn.Parameter(torch.tensor([1.0]), requires_grad=False),
@@ -77,18 +86,15 @@ class TrainRgbStudentTests(unittest.TestCase):
         model.parameters.return_value = parameters
         model.modules.return_value = []
         model.to.return_value = model
-        model.args = {}
-        wrapper = mock_yolo_class.return_value
-        wrapper.model = model
+        mock_build_model.return_value = model
 
         result = extract_trainable_model(
-            yaml_path="student.yaml",
+            ch=3,
             weights_path="dummy.pt",
             device=torch.device("cpu"),
         )
 
-        mock_yolo_class.assert_called_once_with("student.yaml", task="detect")
-        wrapper.load.assert_called_once_with("dummy.pt")
+        mock_build_model.assert_called_once_with(3, "dummy.pt")
         model.train.assert_called_once()
         model.to.assert_called_once_with(torch.device("cpu"))
         self.assertTrue(all(parameter.requires_grad for parameter in parameters))
@@ -97,6 +103,14 @@ class TrainRgbStudentTests(unittest.TestCase):
         self.assertEqual(result.args.cls, 0.5)
         self.assertEqual(result.args.dfl, 1.5)
         self.assertEqual(result.args.device, "cpu")
+
+    def test_build_model_matches_dsec_setup(self):
+        for ch in (3, 5):
+            with self.subTest(ch=ch):
+                model = build_model(ch=ch)
+                self.assertEqual(model.model[0].conv.in_channels, ch)
+                self.assertEqual(model.model[-1].nc, 8)
+                self.assertEqual(model.names, DSEC_NAMES)
 
     def test_optimiser_configuration(self):
         model = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.Linear(4, 2))
@@ -200,7 +214,7 @@ class TrainRgbStudentTests(unittest.TestCase):
         )
         gradient_states = []
 
-        def model_call(batch):
+        def loss_call(batch, preds):
             gradient_states.append(torch.is_grad_enabled())
             return torch.tensor([1.5]), {
                 "box_loss": torch.tensor(0.5),
@@ -208,17 +222,30 @@ class TrainRgbStudentTests(unittest.TestCase):
                 "l1_loss": torch.tensor(0.3),
             }
 
-        model.side_effect = model_call
+        model.loss.side_effect = loss_call
         losses = validate_model(
             [(images, targets)],
             model,
             torch.device("cpu"),
             logger,
+            compute_metrics=False,
         )
 
         model.eval.assert_called_once()
         self.assertEqual(gradient_states, [False])
-        self.assertEqual(losses, (1.5, 0.5, 0.4000000059604645, 0.30000001192092896))
+        # Loss is reported per image so it matches the training loss scale.
+        self.assertEqual(losses["loss"], 0.75)
+        self.assertAlmostEqual(losses["box_loss"], 0.5)
+        self.assertAlmostEqual(losses["cls_loss"], 0.4, places=6)
+        self.assertAlmostEqual(losses["l1_loss"], 0.3, places=6)
+
+    def test_loss_schedule_moves_weight_to_one_to_one_head(self):
+        model = extract_trainable_model(ch=3, weights_path=None, device="cpu", epochs=10)
+        set_loss_schedule(model, 0)
+        self.assertAlmostEqual(model.criterion.o2m, 0.8)
+        set_loss_schedule(model, 9)
+        self.assertAlmostEqual(model.criterion.o2m, 0.1)
+        self.assertAlmostEqual(model.criterion.o2o, 0.9)
 
 
 if __name__ == "__main__":

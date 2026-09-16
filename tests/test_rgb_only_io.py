@@ -1,3 +1,4 @@
+import math
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -5,7 +6,7 @@ from unittest.mock import patch
 import numpy as np
 import torch
 
-from dataset_loader import DSECFusionDataset
+from dataset_loader import DSECFusionDataset, load_causal_events
 
 
 class RgbOnlyIoTests(unittest.TestCase):
@@ -28,6 +29,16 @@ class RgbOnlyIoTests(unittest.TestCase):
         torch.testing.assert_close(targets, torch.tensor([[2.0, 0.25, 0.5, 0.25, 0.5]]))
 
     @patch("dataset_loader.DSECDet")
+    def test_images_are_converted_from_bgr_to_rgb(self, dataset_class):
+        base = dataset_class.return_value
+        bgr = np.zeros((4, 4, 3), dtype=np.uint8)
+        bgr[..., 0], bgr[..., 1], bgr[..., 2] = 10, 20, 30  # cv2 order: blue, green, red
+        base.get_image.return_value = bgr
+        base.get_tracks.return_value = []
+        images, _ = DSECFusionDataset(Path("fake"), rgb_only=True)[0]
+        self.assertEqual((images[:, 0, 0] * 255).round().tolist(), [30.0, 20.0, 10.0])
+
+    @patch("dataset_loader.DSECDet")
     def test_rgb_only_accepts_empty_detection_targets(self, dataset_class):
         base = dataset_class.return_value
         base.get_image.return_value = np.zeros((16, 16, 3), dtype=np.uint8)
@@ -37,26 +48,47 @@ class RgbOnlyIoTests(unittest.TestCase):
         self.assertEqual(targets.numel(), 0)
         base.__getitem__.assert_not_called()
 
+    @patch("dataset_loader.event_time_offset_us", return_value=0)
+    @patch("dataset_loader.extract_from_h5_by_timewindow")
     @patch("dataset_loader.DSECDet")
-    def test_fusion_mode_keeps_paired_sample_and_histogram_path(self, dataset_class):
+    def test_fusion_mode_uses_only_events_before_the_image(self, dataset_class, extract, offset):
         base = dataset_class.return_value
-        events = {"x": np.array([3]), "y": np.array([4]), "p": np.array([1])}
-        base.__getitem__.return_value = {
-            "image": np.zeros((16, 16, 3), dtype=np.uint8),
-            "tracks": [], "events": events,
-        }
+        base.get_image.return_value = np.zeros((16, 16, 3), dtype=np.uint8)
+        base.get_tracks.return_value = []
+        directory = base.rel_index.return_value[2]
+        directory.images.timestamps = np.array([1_000_000, 1_050_000, 1_100_000])
+        base.rel_index.return_value = (2, None, directory)
+        extract.return_value = {"x": np.array([3]), "y": np.array([4]), "p": np.array([1])}
+
         dataset = DSECFusionDataset(Path("fake"), rgb_only=False)
         fused, targets = dataset[7]
-        images = fused[:3]
+
+        base.rel_index.assert_called_once_with(7)
+        # Window ends at the image timestamp and starts 50 ms earlier: no future events.
+        extract.assert_called_once_with(directory.events.event_file, 1_050_000, 1_100_000)
+        base.__getitem__.assert_not_called()
+        base.get_image.assert_called_once_with(7)
+        base.get_tracks.assert_called_once_with(7)
         histogram = fused[3:]
-        base.__getitem__.assert_called_once_with(7)
-        base.get_image.assert_not_called()
-        base.get_tracks.assert_not_called()
-        self.assertEqual(tuple(images.shape), (3, 16, 16))
+        self.assertEqual(tuple(fused[:3].shape), (3, 16, 16))
         self.assertEqual(tuple(histogram.shape), (2, 16, 16))
-        self.assertEqual(histogram[1, 4, 3].item(), 1.0)
-        self.assertEqual(histogram.sum().item(), 1.0)
+        self.assertAlmostEqual(histogram[1, 4, 3].item(), math.log1p(1.0), places=6)
+        self.assertEqual(int((histogram > 0).sum()), 1)
         self.assertEqual(targets.numel(), 0)
+
+    @patch("dataset_loader.event_time_offset_us", return_value=1_020_000)
+    @patch("dataset_loader.extract_from_h5_by_timewindow")
+    @patch("dataset_loader.DSECDet")
+    def test_event_window_is_clipped_to_recording_start(self, dataset_class, extract, offset):
+        base = dataset_class.return_value
+        directory = base.rel_index.return_value[2]
+        directory.images.timestamps = np.array([1_040_000])
+        base.rel_index.return_value = (0, None, directory)
+        extract.return_value = {"x": np.array([], dtype=int)}
+
+        load_causal_events(base, 0)
+
+        extract.assert_called_once_with(directory.events.event_file, 1_020_000, 1_040_000)
 
 
 if __name__ == "__main__":
