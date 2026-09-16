@@ -65,6 +65,12 @@ class DrawingTests(unittest.TestCase):
         self.assertTrue((image == np.array(PREDICTION_COLOUR)).all(axis=2).any())
         self.assertTrue((image == np.array(GROUND_TRUTH_COLOUR)).all(axis=2).any())
 
+    def test_annotate_saves_rgb_input_in_opencv_bgr_order(self):
+        rgb = torch.zeros(3, 8, 8)
+        rgb[0] = 1.0  # pure red in RGB
+        image = annotate_sample(rgb, torch.empty((0, 6)), [])
+        self.assertEqual(image[0, 0].tolist(), [0, 0, 255])  # red in BGR
+
     def test_annotate_handles_no_detections(self):
         image = annotate_sample(torch.zeros(3, 32, 32), torch.empty((0, 6)), [])
         self.assertEqual(image.shape, (32, 32, 3))

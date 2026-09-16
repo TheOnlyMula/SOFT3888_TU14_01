@@ -27,9 +27,8 @@ def pad_to_stride(imgs, stride=32):
 
 def load_student_model(checkpoint_path, weights_path, device):
     """Rebuild the student and restore the trained weights in eval mode."""
-    model_yaml = Path(__file__).resolve().parents[1] / "configs" / "yolo26n_student.yaml"
     model = extract_trainable_model(
-        yaml_path=model_yaml,
+        ch=3,
         weights_path=weights_path,
         device=device,
     )
@@ -76,8 +75,8 @@ def draw_box(image, box, label, colour):
 
 def annotate_sample(img_tensor, detections, truth_boxes):
     """Return the image with ground truth (green) and predictions (red) on it."""
-    image = (img_tensor.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
-    image = np.ascontiguousarray(image)
+    image = (img_tensor[:3].permute(1, 2, 0).numpy() * 255).astype(np.uint8)
+    image = np.ascontiguousarray(cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
 
     for class_id, x1, y1, x2, y2 in truth_boxes:
         draw_box(image, (x1, y1, x2, y2), class_name(class_id), GROUND_TRUTH_COLOUR)

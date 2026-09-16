@@ -1,41 +1,39 @@
 from pathlib import Path
 from types import SimpleNamespace
 import torch
-from ultralytics import YOLO
-import yaml
+from ultralytics.nn.tasks import DetectionModel, load_checkpoint as load_checkpoint_weights
 
 def select_device() -> torch.device:
     """Select CUDA when available; otherwise use CPU."""
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+DSEC_NAMES = {
+    0: 'pedestrian', 1: 'rider', 2: 'car', 3: 'bus',
+    4: 'truck', 5: 'bicycle', 6: 'motorcycle', 7: 'train'
+}
+
+def build_model(ch: int = 3, weights_path: str | Path | None = None) -> DetectionModel:
+    """
+    Build the stock YOLO26n architecture with a DSEC class head and `ch` input channels.
+    Pretrained weights are transferred wherever layer names and shapes match.
+    """
+    model = DetectionModel("yolo26n.yaml", ch=ch, nc=len(DSEC_NAMES), verbose=False)
+    if weights_path:
+        model.load(load_checkpoint_weights(str(weights_path))[0])
+    model.names = DSEC_NAMES
+    return model
+
 def extract_trainable_model(
-    yaml_path: str | Path,
+    ch: int = 3,
     weights_path: str | Path = "yolo26n.pt", 
-    device: str | torch.device | None = None
+    device: str | torch.device | None = None,
+    epochs: int = 1,
 ) -> torch.nn.Module:
     """
-    Load a YOLO architecture from a YAML file, load pretrained weights,
-    extract the raw PyTorch nn.Module, and prep it for custom training.
+    Build a DSEC YOLO26n model, load pretrained weights,
+    and prep the raw PyTorch nn.Module for custom training.
     """
-    with open(yaml_path, 'r') as f:
-        cfg = yaml.safe_load(f)
-    ch = cfg.get('ch', 3)
-
-    yolo_wrapper = YOLO(str(yaml_path), task="detect")
-    
-    if ch != 3:
-        from ultralytics.nn.tasks import DetectionModel
-        yolo_wrapper.model = DetectionModel(str(yaml_path), ch=ch, nc=cfg.get('nc', 80))
-        
-    yolo_wrapper.load(str(weights_path))
-    
-    dsec_names = {
-        0: 'pedestrian', 1: 'rider', 2: 'car', 3: 'bus', 
-        4: 'truck', 5: 'bicycle', 6: 'motorcycle', 7: 'train'
-    }
-    yolo_wrapper.model.names = dsec_names
-    
-    model = yolo_wrapper.model
+    model = build_model(ch, weights_path)
     model.train()
     
     if device:
@@ -50,11 +48,9 @@ def extract_trainable_model(
         'dfl': 1.5,
         'label_smoothing': 0.0,
         'fl_gamma': 2.0,
-        'device': str(device) if device else None
+        'device': str(device) if device else None,
+        'epochs': epochs,
     }
-    
-    if hasattr(model, 'args') and isinstance(model.args, dict):
-        training_hyps.update(model.args)
 
     hyp_namespace = SimpleNamespace(**training_hyps)
     
@@ -64,6 +60,15 @@ def extract_trainable_model(
             m.args = hyp_namespace
 
     return model
+
+def set_loss_schedule(model: torch.nn.Module, completed_epochs: int) -> None:
+    if not hasattr(model, "init_criterion"):
+        return
+    if getattr(model, "criterion", None) is None:
+        model.criterion = model.init_criterion()
+    if hasattr(model.criterion, "update"):
+        model.criterion.updates = completed_epochs - 1
+        model.criterion.update()
 
 def create_optimiser(model: torch.nn.Module) -> torch.optim.Optimizer:
     """Create the optimiser for the unfrozen student parameters."""

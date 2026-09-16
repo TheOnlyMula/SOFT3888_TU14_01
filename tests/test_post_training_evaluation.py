@@ -7,8 +7,10 @@ import torch
 from torch.utils.data import DataLoader, SequentialSampler
 
 from dataset_loader import yolo_collate_fn
-from train_rgb_student import create_rgb_test_loader, evaluate_test_model, train_model
-import train_rgb_student as training
+from dataset_loader import create_rgb_test_loader
+from evaluate import evaluate_test_model, format_results_table
+from training import train_model
+import training
 
 
 class BatchLossModel(torch.nn.Module):
@@ -21,8 +23,15 @@ class BatchLossModel(torch.nn.Module):
         self.dropout = torch.nn.Dropout()
         self.observed = []
 
-    def forward(self, batch):
-        self.dropout(self.bn(batch["img"]))
+    def forward(self, x):
+        if isinstance(x, dict):  # training path: model(batch) returns the loss
+            return self.loss(x)
+        self.dropout(self.bn(x))
+        return x
+
+    def loss(self, batch, preds=None):
+        if preds is None:
+            self.dropout(self.bn(batch["img"]))
         self.observed.append(
             (
                 self.training,
@@ -40,6 +49,13 @@ class BatchLossModel(torch.nn.Module):
             "cls_loss": torch.tensor(0.2),
             "l1_loss": torch.tensor(0.1),
         }
+
+
+def val_results(loss):
+    return {
+        "loss": loss, "box_loss": 0.0, "cls_loss": 0.0, "l1_loss": 0.0,
+        "precision": 0.0, "recall": 0.0, "map50": 0.0, "map50_95": 0.0, "agnostic_map50": 0.0,
+    }
 
 
 def make_samples(count=5, empty_targets=False):
@@ -132,17 +148,18 @@ class PostTrainingEvaluationTests(unittest.TestCase):
             self.model.weight.fill_(99.0)
         before = self.model.bn.running_mean.clone()
 
-        batch_loss, image_loss = evaluate_test_model(
+        results = evaluate_test_model(
             make_loader(),
             self.model,
             self.device,
             self.logger,
             self.checkpoint,
+            compute_metrics=False,
         )
 
         self.assertEqual(self.model.weight.item(), 2.0)
-        self.assertEqual(batch_loss, 7.5)
-        self.assertEqual(image_loss, 3.0)
+        # Per-image loss, on the same scale as the training and validation loss.
+        self.assertEqual(results["loss"], 3.0)
         self.assertEqual(
             self.model.observed,
             [
@@ -152,12 +169,10 @@ class PostTrainingEvaluationTests(unittest.TestCase):
         )
         self.assertTrue(torch.equal(before, self.model.bn.running_mean))
         self.assertIsNone(self.model.weight.grad)
-        self.logger.info.assert_has_calls(
-            [
-                call("Average test batch loss: %.4f", 7.5),
-                call("Average test per-image loss: %.4f", 3.0),
-            ]
-        )
+        self.logger.info.assert_any_call("Test samples: %d | Test batches: %d", 5, 2)
+        self.assertAlmostEqual(results["box_loss"], 0.3, places=6)
+        messages = [args[0] for args, _ in self.logger.info.call_args_list]
+        self.assertTrue(any(message.startswith("Test loss") for message in messages))
         self.assertTrue(torch.is_grad_enabled())
 
     def test_batches_with_no_detection_targets_are_valid(self):
@@ -167,8 +182,9 @@ class PostTrainingEvaluationTests(unittest.TestCase):
             self.device,
             self.logger,
             self.checkpoint,
+            compute_metrics=False,
         )
-        self.assertEqual(result, (7.5, 3.0))
+        self.assertEqual(result["loss"], 3.0)
         self.assertEqual(self.model.observed[0][4:], ((0, 1), (0, 4), (0,)))
 
     def test_missing_checkpoint_does_not_use_current_weights(self):
@@ -221,11 +237,10 @@ class PostTrainingEvaluationTests(unittest.TestCase):
         self.assertEqual(self.model.observed, [])
 
     def test_nonfinite_test_loss_does_not_report_success(self):
-        with patch.object(
-            self.model,
-            "forward",
-            return_value=(torch.tensor(float("nan")), None),
-        ):
+        nan_loss = (torch.tensor(float("nan")), {
+            "box_loss": torch.tensor(0.0), "cls_loss": torch.tensor(0.0), "l1_loss": torch.tensor(0.0),
+        })
+        with patch.object(self.model, "loss", return_value=nan_loss):
             with self.assertRaisesRegex(ValueError, "Non-finite"):
                 evaluate_test_model(
                     make_loader(),
@@ -233,17 +248,45 @@ class PostTrainingEvaluationTests(unittest.TestCase):
                     self.device,
                     self.logger,
                     self.checkpoint,
+                    compute_metrics=False,
                 )
         messages = [args[0] for args, _ in self.logger.info.call_args_list]
-        self.assertNotIn("Average test batch loss: %.4f", messages)
+        self.assertFalse(any(message.startswith("Test loss") for message in messages))
+
+    def test_real_detector_reports_metrics_per_class_and_saves_plots(self):
+        from utils import extract_trainable_model
+
+        model = extract_trainable_model(ch=3, weights_path=None, device="cpu")
+        torch.save({"model_state_dict": model.state_dict()}, self.checkpoint)
+        samples = [
+            (torch.rand(3, 64, 64), torch.tensor([[2.0, 0.5, 0.5, 0.3, 0.3], [0.0, 0.3, 0.6, 0.1, 0.2]]))
+            for _ in range(2)
+        ]
+        loader = DataLoader(samples, batch_size=2, collate_fn=yolo_collate_fn)
+        save_dir = self.directory / "test"
+
+        results = evaluate_test_model(loader, model, self.device, self.logger, self.checkpoint, save_dir=save_dir)
+
+        for key in ("loss", "precision", "recall", "map50", "map50_95", "agnostic_map50"):
+            self.assertIn(key, results)
+        rows = results["per_class"]
+        self.assertEqual([row["class"] for row in rows], ["all", "pedestrian", "car"])
+        self.assertEqual(rows[0]["images"], 2)
+        self.assertEqual(rows[0]["instances"], 4)
+        self.assertEqual(rows[0]["map50"], results["map50"])
+        logged = [args[0] for args, _ in self.logger.info.call_args_list]
+        self.assertIn(format_results_table(rows)[0], logged)
+        self.assertTrue(any(line.lstrip().startswith("all ") for line in logged))
+        self.assertTrue((save_dir / "confusion_matrix.png").is_file())
+        self.assertTrue((save_dir / "val_batch0_pred.jpg").is_file())
 
     def test_training_saves_best_validation_epoch_instead_of_last_epoch(self):
         self.checkpoint.unlink()
         loader = make_loader(4)
         optimiser = torch.optim.SGD(self.model.parameters(), lr=0.1)
         with patch(
-            "train_rgb_student.validate_model",
-            side_effect=[(1.0, 0.0, 0.0, 0.0), (3.0, 0.0, 0.0, 0.0)],
+            "training.validate_model",
+            side_effect=[val_results(1.0), val_results(3.0)],
         ):
             path = train_model(
                 loader,
@@ -266,8 +309,8 @@ class PostTrainingEvaluationTests(unittest.TestCase):
         loader = make_loader(4)
         optimiser = torch.optim.SGD(self.model.parameters(), lr=0.1)
         with patch(
-            "train_rgb_student.validate_model",
-            side_effect=[(3.0, 0.0, 0.0, 0.0), (1.0, 0.0, 0.0, 0.0)],
+            "training.validate_model",
+            side_effect=[val_results(3.0), val_results(1.0)],
         ):
             train_model(
                 loader,
@@ -288,8 +331,8 @@ class PostTrainingEvaluationTests(unittest.TestCase):
         loader = make_loader(4)
         optimiser = torch.optim.SGD(self.model.parameters(), lr=0.1)
         with patch(
-            "train_rgb_student.validate_model",
-            return_value=(float("nan"), 0.0, 0.0, 0.0),
+            "training.validate_model",
+            return_value=val_results(float("nan")),
         ):
             with self.assertRaisesRegex(ValueError, "validation loss"):
                 train_model(
@@ -308,50 +351,65 @@ class PostTrainingEvaluationTests(unittest.TestCase):
             2.0,
         )
 
-    def _run_main(self, *extra_args):
+    def _run_main(self, *extra_args, role="student", rgb_only=True):
         events = []
+        self.calls = {}
         loader = make_loader()
         logger = MagicMock()
         with unittest.mock.patch.multiple(
             training,
             select_device=MagicMock(return_value=self.device),
-            create_rgb_dataloaders=MagicMock(
-                side_effect=lambda **kwargs: events.append("dataloaders") or (loader, loader)
+            create_dataloaders=MagicMock(
+                side_effect=lambda **kwargs: events.append("dataloaders") or self.calls.update(dataloaders=kwargs) or (loader, loader)
             ),
-            extract_trainable_model=MagicMock(return_value=self.model),
+            extract_trainable_model=MagicMock(
+                side_effect=lambda **kwargs: self.calls.update(model=kwargs) or self.model
+            ),
             create_optimiser=MagicMock(return_value=MagicMock()),
             train_model=MagicMock(
-                side_effect=lambda *args, **kwargs: events.append("train") or self.checkpoint
+                side_effect=lambda *args, **kwargs: events.append("train") or self.calls.update(train=kwargs) or self.checkpoint
             ),
-            create_rgb_test_loader=MagicMock(
-                side_effect=lambda **kwargs: events.append("test_loader") or loader
+            create_test_loader=MagicMock(
+                side_effect=lambda **kwargs: events.append("test_loader") or self.calls.update(test_loader=kwargs) or loader
             ),
             evaluate_test_model=MagicMock(
-                side_effect=lambda **kwargs: events.append("loss_evaluation")
-            ),
-            evaluate_map_model=MagicMock(
-                side_effect=lambda **kwargs: events.append("map_evaluation")
+                side_effect=lambda **kwargs: events.append("test_evaluation") or self.calls.update(test=kwargs)
             ),
         ), patch.object(training.log, "create_log_directory", return_value=self.directory), patch.object(
             training.log, "create_logger", return_value=logger
         ), patch.object(training.log, "log_command"), patch.object(
             training.log, "log_model_config"
-        ), patch.object(training.settings, "update"), patch(
+        ), patch(
             "sys.argv",
             ["train_rgb_student.py", "--dataset-path", "fake", *extra_args],
         ):
-            training.main()
+            training.main(role=role, rgb_only=rgb_only)
 
         return events
 
-    def test_main_runs_loss_and_map_evaluation_after_training(self):
+    def test_main_runs_test_evaluation_after_training(self):
         self.assertEqual(
             self._run_main(),
-            ["dataloaders", "train", "test_loader", "loss_evaluation", "map_evaluation"],
+            ["dataloaders", "train", "test_loader", "test_evaluation"],
         )
+        self.assertEqual(self.calls["test"]["checkpoint_path"], self.checkpoint)
+        self.assertEqual(self.calls["test"]["save_dir"], self.directory / "test")
 
     def test_main_skip_test_does_not_open_test_data(self):
         self.assertEqual(self._run_main("--skip-test"), ["dataloaders", "train"])
+
+    def test_teacher_runs_the_same_pipeline_with_event_channels(self):
+        student_events = self._run_main()
+        student_calls = self.calls
+        teacher_events = self._run_main(role="teacher", rgb_only=False)
+        teacher_calls = self.calls
+
+        self.assertEqual(teacher_events, student_events)
+        self.assertEqual((student_calls["model"]["ch"], teacher_calls["model"]["ch"]), (3, 5))
+        for step in ("dataloaders", "test_loader"):
+            self.assertTrue(student_calls[step]["rgb_only"])
+            self.assertFalse(teacher_calls[step]["rgb_only"])
+        self.assertEqual(teacher_calls["train"]["checkpoint_path"].name, "best_teacher_yolo.pt")
 
 
 if __name__ == "__main__":
