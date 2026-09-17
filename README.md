@@ -1,8 +1,8 @@
 # SOFT3888_TU14_01
 
-This project will develop an event-privileged training framework using the DSEC-Detection dataset. A teacher model will use paired RGB and event-camera information to perform traffic object detection, while an RGB-only student model will learn from the teacher through knowledge distillation. This approach will investigate whether object-aware distillation can improve the transfer of information from the teacher to the student. The resulting student model will operate independently using RGB input only during inference. 
+This project will develop an event-privileged training framework using the DSEC-Detection dataset. A teacher model will use paired RGB and event-camera information to perform traffic object detection, while an RGB-only student model will learn from the teacher through knowledge distillation. This approach will investigate whether object-aware distillation can improve the transfer of information from the teacher to the student. The resulting student model will operate independently using RGB input only during inference.
 
-Our capstone project for SOFT3888 aims to address the drawbacks of RGB cameras in object detection by integrating data from event cameras into model training. If successful, the primary benefit of this approach is detecting objects in traffic more accurately with reduced computational overhead in a more lightweight framework. This allows for faster response times while maintaining accuracy in adequate lighting conditions, and surpassing the accuracy of conventional RGB systems in harsh lighting conditions. 
+Our capstone project for SOFT3888 aims to address the drawbacks of RGB cameras in object detection by integrating data from event cameras into model training. If successful, the primary benefit of this approach is detecting objects in traffic more accurately with reduced computational overhead in a more lightweight framework. This allows for faster response times while maintaining accuracy in adequate lighting conditions, and surpassing the accuracy of conventional RGB systems in harsh lighting conditions.
 
 ## Repository structure
 
@@ -44,7 +44,7 @@ This file defines the DSEC dataset access layer. It creates a custom dataset tha
 - maps labels into YOLO-style bounding box targets,
 - supports both RGB-only and fused RGB + event training paths.
 
-Images and labels come from the DSEC detector utilities. For real-time detection, each RGB image is paired only with events from the 50 ms *before* its timestamp (`load_causal_events` in `dataset_loader.py`), so the model never sees events that happen after the image. DSECDet's own `sync` windows are not used for events: `sync="back"` returns the 50 ms after the image, and `sync="front"` pairs the image with the previous frame's labels. The first frame of each sequence has no preceding events, so its event channels are empty.
+Images and labels come from the DSEC detector utilities. For real-time detection, each RGB image is paired only with events from the 50 ms _before_ its timestamp (`load_causal_events` in `dataset_loader.py`), so the model never sees events that happen after the image. DSECDet's own `sync` windows are not used for events: `sync="back"` returns the 50 ms after the image, and `sync="front"` pairs the image with the previous frame's labels. The first frame of each sequence has no preceding events, so its event channels are empty.
 
 ### training.py
 
@@ -97,6 +97,7 @@ cd SOFT3888_TU14_01
 ```
 
 ### 2. Create the environment
+
 ```bash
 mamba env create -f environment.yml
 mamba activate dsec-env
@@ -104,12 +105,14 @@ mamba activate dsec-env
 
 If you are using conda instead of mamba, the same environment definition should work with `conda env create -f environment.yml`.
 
-For macOS and Linux systems, you may also use a python env using the following process: 
+For macOS and Linux systems, you may also use a python env using the following process:
+
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 ```
-This will isolate the current terminal session and run a Python virtual environment. 
+
+This will isolate the current terminal session and run a Python virtual environment.
 
 ### 3. Install the DSEC detection utilities
 
@@ -234,6 +237,25 @@ Both models use the stock Ultralytics YOLO26n architecture with an 8-class DSEC 
 
 The evaluation loads the saved checkpoint and evaluates it on the test split with the same function used during training, writing metrics to the log and plots to the run's `test/` folder.
 
+## Degraded evaluation benchmark
+
+The degraded evaluation benchmark compares a trained checkpoint on the same test frames under three conditions:
+
+- clean
+- darkened
+- over-exposed
+
+Run the benchmark with:
+
+```bash
+PYTHONPATH=. python evaluate.py \
+  --weights "/path/to/checkpoint.pt" \
+  --type student \
+  --dataset-path "/path/to/DSEC_ROOT" \
+  --benchmark \
+  --degradation-strength 1.0 \
+  --evaluation-seed 42
+
 ## Dataset and training notes
 
 - The project uses a deterministic split based on the official DSEC configuration file.
@@ -248,7 +270,7 @@ Run the unit and integration checks from the repository root:
 
 ```bash
 python -m unittest discover -s tests -v
-```
+````
 
 The test suite covers the project’s expected data-loading and training workflow behaviour.
 
