@@ -49,6 +49,72 @@ class DegradedEvaluationBenchmarkTests(unittest.TestCase):
 
         self.assertNotEqual(first, second)
 
+    def test_degradation_seed_changes_with_evaluation_seed(self):
+        first = degradation_seed(
+            42,
+            "zurich_city_00_a",
+            123,
+            "dark",
+            0.5,
+        )
+
+        second = degradation_seed(
+            43,
+            "zurich_city_00_a",
+            123,
+            "dark",
+            0.5,
+        )
+
+        self.assertNotEqual(first, second)
+
+    def test_degradation_seed_changes_with_sequence(self):
+        first = degradation_seed(
+            42,
+            "zurich_city_00_a",
+            123,
+            "dark",
+            0.5,
+        )
+
+        second = degradation_seed(
+            42,
+            "zurich_city_01_a",
+            123,
+            "dark",
+            0.5,
+        )
+
+        self.assertNotEqual(first, second)
+
+    def test_degradation_seed_changes_with_settings(self):
+        first = degradation_seed(
+            42,
+            "zurich_city_00_a",
+            123,
+            "dark",
+            0.5,
+        )
+
+        different_type = degradation_seed(
+            42,
+            "zurich_city_00_a",
+            123,
+            "overexposed",
+            0.5,
+        )
+
+        different_strength = degradation_seed(
+            42,
+            "zurich_city_00_a",
+            123,
+            "dark",
+            0.8,
+        )
+
+        self.assertNotEqual(first, different_type)
+        self.assertNotEqual(first, different_strength)
+
     @patch("dataset_loader.DSECDet")
     @patch("dataset_loader.yaml_file_to_dict")
     def test_invalid_degradation_is_rejected(self, _, __):
@@ -192,8 +258,50 @@ class DegradedEvaluationBenchmarkTests(unittest.TestCase):
             ["clean", "dark", "overexposed"],
         )
 
+        self.assertEqual(create_loader.call_count, 3)
+
+        for call in create_loader.call_args_list:
+            self.assertTrue(call.kwargs["rgb_only"])
+            self.assertEqual(call.kwargs["degradation_strength"], 0.5)
+            self.assertEqual(call.kwargs["evaluation_seed"], 42)
+
         self.assertAlmostEqual(results["dark"]["map50_drop"], 0.10)
         self.assertAlmostEqual(results["overexposed"]["map50_drop"], 0.15)
+
+    @patch("evaluate.evaluate_test_model")
+    @patch("evaluate.rgb_loader_fingerprint")
+    @patch("evaluate.create_test_loader")
+    def test_benchmark_uses_same_checkpoint_for_every_condition(
+        self,
+        create_loader,
+        fingerprint,
+        evaluate_model,
+    ):
+        create_loader.side_effect = [object(), object(), object()]
+        fingerprint.side_effect = ["clean", "dark", "overexposed"]
+
+        evaluate_model.return_value = {
+            "map50": 0.5,
+            "map50_95": 0.3,
+            "recall": 0.6,
+        }
+
+        checkpoint = Path("best_student.pt")
+
+        evaluate_degraded_benchmark(
+            dataset_path=Path("fake"),
+            model=MagicMock(),
+            device=torch.device("cpu"),
+            logger=MagicMock(),
+            checkpoint_path=checkpoint,
+            rgb_only=True,
+            evaluation_seed=42,
+        )
+
+        self.assertEqual(evaluate_model.call_count, 3)
+
+        for call in evaluate_model.call_args_list:
+            self.assertEqual(call.args[4], checkpoint)
 
     def test_benchmark_table_contains_required_metrics(self):
         results = {
