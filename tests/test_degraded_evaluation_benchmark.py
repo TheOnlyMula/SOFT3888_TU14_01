@@ -229,6 +229,133 @@ class DegradedEvaluationBenchmarkTests(unittest.TestCase):
         self.assertIn("dark", output)
         self.assertIn("overexposed", output)
 
+    @patch("dataset_loader.DSECDet")
+    def test_rgb_benchmark_does_not_open_event_files(self, dataset_class):
+        base = dataset_class.return_value
+
+        base.get_events.side_effect = AssertionError("Must not read events")
+        base.__getitem__.side_effect = AssertionError("Must not load paired sample")
+
+        base.get_image.return_value = np.full(
+            (16, 16, 3),
+            100,
+            dtype=np.uint8,
+        )
+        base.get_tracks.return_value = []
+
+        directory = base.rel_index.return_value[2]
+        directory.name = "zurich_city_00_a"
+        base.rel_index.return_value = (7, None, directory)
+
+        dataset = DSECFusionDataset(
+            Path("fake"),
+            split="test",
+            rgb_only=True,
+            degradation="dark",
+            degradation_strength=0.5,
+            evaluation_seed=42,
+        )
+
+        dataset[7]
+
+        base.get_image.assert_called_once_with(7)
+        base.get_tracks.assert_called_once_with(7)
+        base.get_events.assert_not_called()
+        base.__getitem__.assert_not_called()
+
+    @patch("dataset_loader.load_causal_events")
+    @patch("dataset_loader.DSECDet")
+    def test_teacher_event_channels_and_labels_are_unchanged(
+        self,
+        dataset_class,
+        load_events,
+    ):
+        base = dataset_class.return_value
+
+        base.get_image.return_value = np.full(
+            (16, 16, 3),
+            100,
+            dtype=np.uint8,
+        )
+
+        base.get_tracks.return_value = [
+            {
+                "class_id": 2,
+                "x": 2.0,
+                "y": 4.0,
+                "w": 4.0,
+                "h": 8.0,
+            }
+        ]
+
+        load_events.return_value = {
+            "x": np.array([3]),
+            "y": np.array([4]),
+            "p": np.array([1]),
+        }
+
+        directory = base.rel_index.return_value[2]
+        directory.name = "zurich_city_00_a"
+        base.rel_index.return_value = (7, None, directory)
+
+        clean_dataset = DSECFusionDataset(
+            Path("fake"),
+            split="test",
+            rgb_only=False,
+            degradation="clean",
+        )
+
+        degraded_dataset = DSECFusionDataset(
+            Path("fake"),
+            split="test",
+            rgb_only=False,
+            degradation="dark",
+            degradation_strength=0.5,
+            evaluation_seed=42,
+        )
+
+        clean_image, clean_targets = clean_dataset[7]
+        degraded_image, degraded_targets = degraded_dataset[7]
+
+        torch.testing.assert_close(
+            clean_image[3:],
+            degraded_image[3:],
+        )
+
+        torch.testing.assert_close(
+            clean_targets,
+            degraded_targets,
+        )
+
+    def test_rgb_fingerprint_is_independent_of_worker_count(self):
+        images = torch.arange(
+            8 * 3 * 4 * 4,
+            dtype=torch.float32,
+        ).reshape(8, 3, 4, 4)
+
+        targets = torch.zeros(8)
+
+        dataset = TensorDataset(images, targets)
+
+        loader_zero_workers = DataLoader(
+            dataset,
+            batch_size=2,
+            shuffle=False,
+            num_workers=0,
+        )
+
+        loader_four_workers = DataLoader(
+            dataset,
+            batch_size=2,
+            shuffle=False,
+            num_workers=4,
+        )
+
+        self.assertEqual(
+            rgb_loader_fingerprint(loader_zero_workers),
+            rgb_loader_fingerprint(loader_four_workers),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
