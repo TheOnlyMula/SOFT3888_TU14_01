@@ -267,6 +267,10 @@ class DegradedEvaluationBenchmarkTests(unittest.TestCase):
 
         self.assertAlmostEqual(results["dark"]["map50_drop"], 0.10)
         self.assertAlmostEqual(results["overexposed"]["map50_drop"], 0.15)
+        self.assertAlmostEqual(results["dark"]["map50_95_drop"], 0.10)
+        self.assertAlmostEqual(results["overexposed"]["map50_95_drop"], 0.15)
+        self.assertEqual(results["clean"]["map50_drop"], 0.0)
+        self.assertEqual(results["clean"]["map50_95_drop"], 0.0)
 
     @patch("evaluate.evaluate_test_model")
     @patch("evaluate.rgb_loader_fingerprint")
@@ -310,18 +314,21 @@ class DegradedEvaluationBenchmarkTests(unittest.TestCase):
                 "map50_95": 0.40,
                 "recall": 0.70,
                 "map50_drop": 0.0,
+                "map50_95_drop": 0.0,
             },
             "dark": {
                 "map50": 0.50,
                 "map50_95": 0.30,
                 "recall": 0.60,
                 "map50_drop": 0.10,
+                "map50_95_drop": 0.10,
             },
             "overexposed": {
                 "map50": 0.45,
                 "map50_95": 0.25,
                 "recall": 0.55,
                 "map50_drop": 0.15,
+                "map50_95_drop": 0.15,
             },
         }
 
@@ -333,6 +340,7 @@ class DegradedEvaluationBenchmarkTests(unittest.TestCase):
         self.assertIn("mAP50-95", output)
         self.assertIn("Recall", output)
         self.assertIn("mAP50 Drop", output)
+        self.assertIn("mAP50-95 Drop", output)
         self.assertIn("clean", output)
         self.assertIn("dark", output)
         self.assertIn("overexposed", output)

@@ -361,6 +361,7 @@ def format_benchmark_table(results: dict[str, dict]) -> list[str]:
         f"{'mAP50-95':>12}"
         f"{'Recall':>10}"
         f"{'mAP50 Drop':>12}"
+        f"{'mAP50-95 Drop':>15}"
     )
 
     lines = [header]
@@ -373,6 +374,7 @@ def format_benchmark_table(results: dict[str, dict]) -> list[str]:
             f"{row['map50_95']:>12.3f}"
             f"{row['recall']:>10.3f}"
             f"{row['map50_drop']:>12.3f}"
+            f"{row['map50_95_drop']:>15.3f}"
         )
 
     return lines
