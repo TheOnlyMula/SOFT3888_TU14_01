@@ -9,8 +9,9 @@ import torch
 from torch.utils.data import DataLoader
 from ultralytics.models.yolo.detect import DetectionValidator
 from ultralytics.utils.metrics import DetMetrics
-from dataset_loader import create_test_loader
+from dataset_loader import create_test_loader, rgb_loader_fingerprint
 from utils import extract_trainable_model
+
 
 def _prepare_yolo_batch(imgs, targets, device):
     imgs = imgs.to(device)
@@ -29,6 +30,7 @@ def _prepare_yolo_batch(imgs, targets, device):
 
 class DsecDetectionValidator(DetectionValidator):
     """Ultralytics detection validator"""
+
     def init_metrics(self, model: torch.nn.Module) -> None:
         super().init_metrics(model)
         self.agnostic_metrics = DetMetrics()
@@ -62,44 +64,59 @@ class DsecDetectionValidator(DetectionValidator):
 def per_class_results(validator: DsecDetectionValidator) -> list[dict]:
     metrics = validator.metrics
     overall = summarise_detection_stats(validator)
-    rows = [{
-        "class": "all",
-        "images": int(validator.seen),
-        "instances": int(metrics.nt_per_class.sum()),
-        "precision": overall["precision"],
-        "recall": overall["recall"],
-        "map50": overall["map50"],
-        "map50_95": overall["map50_95"],
-    }]
+    rows = [
+        {
+            "class": "all",
+            "images": int(validator.seen),
+            "instances": int(metrics.nt_per_class.sum()),
+            "precision": overall["precision"],
+            "recall": overall["recall"],
+            "map50": overall["map50"],
+            "map50_95": overall["map50_95"],
+        }
+    ]
     for i, class_index in enumerate(metrics.ap_class_index):
         precision, recall, map50, map50_95 = metrics.class_result(i)
-        rows.append({
-            "class": validator.names[int(class_index)],
-            "images": int(metrics.nt_per_image[class_index]),
-            "instances": int(metrics.nt_per_class[class_index]),
-            "precision": float(precision),
-            "recall": float(recall),
-            "map50": float(map50),
-            "map50_95": float(map50_95),
-        })
+        rows.append(
+            {
+                "class": validator.names[int(class_index)],
+                "images": int(metrics.nt_per_image[class_index]),
+                "instances": int(metrics.nt_per_class[class_index]),
+                "precision": float(precision),
+                "recall": float(recall),
+                "map50": float(map50),
+                "map50_95": float(map50_95),
+            }
+        )
     return rows
 
 
 def format_results_table(rows: list[dict]) -> list[str]:
     """Lines of a results table"""
-    header = ("%22s" + "%11s" * 6) % ("Class", "Images", "Instances", "Box(P", "R", "mAP50", "mAP50-95)")
+    header = ("%22s" + "%11s" * 6) % (
+        "Class",
+        "Images",
+        "Instances",
+        "Box(P",
+        "R",
+        "mAP50",
+        "mAP50-95)",
+    )
     row_format = "%22s" + "%11i" * 2 + "%11.3g" * 4
     lines = [header]
     for row in rows:
-        lines.append(row_format % (
-            row["class"],
-            row["images"],
-            row["instances"],
-            row["precision"],
-            row["recall"],
-            row["map50"],
-            row["map50_95"],
-        ))
+        lines.append(
+            row_format
+            % (
+                row["class"],
+                row["images"],
+                row["instances"],
+                row["precision"],
+                row["recall"],
+                row["map50"],
+                row["map50_95"],
+            )
+        )
     return lines
 
 
@@ -121,7 +138,8 @@ def create_metrics_validator(
     if plots:
         Path(save_dir).mkdir(parents=True, exist_ok=True)
     validator = DsecDetectionValidator(
-        save_dir=Path(save_dir) if plots else Path(tempfile.gettempdir()), args={"plots": plots}
+        save_dir=Path(save_dir) if plots else Path(tempfile.gettempdir()),
+        args={"plots": plots},
     )
     validator.device = device
     validator.data = {}
@@ -146,7 +164,9 @@ def validate_model(
 
     model.eval()
     totals = {"loss": 0.0, "box_loss": 0.0, "cls_loss": 0.0, "l1_loss": 0.0}
-    validator = create_metrics_validator(model, device, save_dir) if compute_metrics else None
+    validator = (
+        create_metrics_validator(model, device, save_dir) if compute_metrics else None
+    )
     logger.info("Starting validation")
 
     with torch.no_grad():
@@ -156,7 +176,12 @@ def validate_model(
             loss, loss_items = model.loss(batch, preds)
 
             step = {"loss": loss.sum().item() / imgs.shape[0]}
-            step.update({name: float(loss_items[name]) for name in ("box_loss", "cls_loss", "l1_loss")})
+            step.update(
+                {
+                    name: float(loss_items[name])
+                    for name in ("box_loss", "cls_loss", "l1_loss")
+                }
+            )
             for name, value in step.items():
                 totals[name] += value
 
@@ -231,14 +256,25 @@ def evaluate_test_model(
         raise RuntimeError(message) from exc
 
     logger.info("Loaded best checkpoint: %s", checkpoint_path)
-    results = validate_model(test_loader, model, device, logger, compute_metrics=compute_metrics, save_dir=save_dir)
+    results = validate_model(
+        test_loader,
+        model,
+        device,
+        logger,
+        compute_metrics=compute_metrics,
+        save_dir=save_dir,
+    )
 
     if not math.isfinite(results["loss"]):
         message = "Non-finite test loss; no valid test summary is available."
         logger.error(message)
         raise ValueError(message)
 
-    logger.info("Test samples: %d | Test batches: %d", len(test_loader.dataset), len(test_loader))
+    logger.info(
+        "Test samples: %d | Test batches: %d",
+        len(test_loader.dataset),
+        len(test_loader),
+    )
     logger.info(
         "Test loss = %.4f box_loss = %.4f cls_loss = %.4f l1_loss = %.4f",
         results["loss"],
@@ -249,10 +285,105 @@ def evaluate_test_model(
     if compute_metrics:
         for line in format_results_table(results["per_class"]):
             logger.info(line)
-        logger.info("Class-agnostic mAP50 = %.3g (all classes merged into one)", results["agnostic_map50"])
+        logger.info(
+            "Class-agnostic mAP50 = %.3g (all classes merged into one)",
+            results["agnostic_map50"],
+        )
     if save_dir is not None:
         logger.info("Test plots saved to %s", save_dir)
     return results
+
+
+def evaluate_degraded_benchmark(
+    dataset_path: Path,
+    model: torch.nn.Module,
+    device: torch.device,
+    logger: logging.Logger,
+    checkpoint_path: Path,
+    rgb_only: bool,
+    batch_size: int = 16,
+    num_workers: int = 8,
+    max_samples: int | None = None,
+    degradation_strength: float = 1.0,
+    evaluation_seed: int = 0,
+) -> dict[str, dict]:
+    conditions = ("clean", "dark", "overexposed")
+    results = {}
+
+    for condition in conditions:
+        loader = create_test_loader(
+            dataset_path,
+            logger,
+            rgb_only=rgb_only,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            max_samples=max_samples,
+            degradation=condition,
+            degradation_strength=degradation_strength,
+            evaluation_seed=evaluation_seed,
+        )
+
+        fingerprint = rgb_loader_fingerprint(loader)
+
+        condition_results = evaluate_test_model(
+            loader,
+            model,
+            device,
+            logger,
+            checkpoint_path,
+        )
+
+        results[condition] = {
+            "map50": condition_results["map50"],
+            "map50_95": condition_results["map50_95"],
+            "recall": condition_results["recall"],
+            "fingerprint": fingerprint,
+        }
+
+    clean = results["clean"]
+
+    for condition in ("dark", "overexposed"):
+        results[condition]["map50_drop"] = clean["map50"] - results[condition]["map50"]
+        results[condition]["map50_95_drop"] = (
+            clean["map50_95"] - results[condition]["map50_95"]
+        )
+        results[condition]["recall_drop"] = (
+            clean["recall"] - results[condition]["recall"]
+        )
+
+    results["clean"]["map50_drop"] = 0.0
+    results["clean"]["map50_95_drop"] = 0.0
+    results["clean"]["recall_drop"] = 0.0
+
+    return results
+
+
+def format_benchmark_table(results: dict[str, dict]) -> list[str]:
+    header = (
+        f"{'Condition':<15}"
+        f"{'mAP50':>10}"
+        f"{'mAP50-95':>12}"
+        f"{'Recall':>10}"
+        f"{'mAP50 Drop':>12}"
+        f"{'mAP50-95 Drop':>15}"
+        f"{'Recall Drop':>13}"
+    )
+
+    lines = [header]
+
+    for condition in ("clean", "dark", "overexposed"):
+        row = results[condition]
+        lines.append(
+            f"{condition:<15}"
+            f"{row['map50']:>10.3f}"
+            f"{row['map50_95']:>12.3f}"
+            f"{row['recall']:>10.3f}"
+            f"{row['map50_drop']:>12.3f}"
+            f"{row['map50_95_drop']:>15.3f}"
+            f"{row['recall_drop']:>13.3f}"
+        )
+
+    return lines
 
 
 if __name__ == "__main__":
@@ -260,12 +391,29 @@ if __name__ == "__main__":
     import sys
 
     parser = argparse.ArgumentParser(description="Evaluate a trained YOLO model.")
-    parser.add_argument("--weights", type=Path, required=True, help="Path to the trained weights (.pt)")
-    parser.add_argument("--type", type=str, required=True, choices=["student", "teacher"], help="Evaluating student or teacher")
-    parser.add_argument("--dataset-path", type=Path, required=True, help="Path to the dataset directory")
+    parser.add_argument(
+        "--weights", type=Path, required=True, help="Path to the trained weights (.pt)"
+    )
+    parser.add_argument(
+        "--type",
+        type=str,
+        required=True,
+        choices=["student", "teacher"],
+        help="Evaluating student or teacher",
+    )
+    parser.add_argument(
+        "--dataset-path", type=Path, required=True, help="Path to the dataset directory"
+    )
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--max-samples", type=int, default=None)
+    parser.add_argument(
+        "--benchmark",
+        action="store_true",
+        help="Evaluate clean, dark and overexposed benchmark conditions.",
+    )
+    parser.add_argument("--degradation-strength", type=float, default=1.0)
+    parser.add_argument("--evaluation-seed", type=int, default=0)
     args = parser.parse_args()
 
     log_directory = log.create_log_directory(args.type)
@@ -274,19 +422,52 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     rgb_only = args.type == "student"
-    test_loader = create_test_loader(
-        args.dataset_path,
-        logger,
-        rgb_only=rgb_only,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        max_samples=args.max_samples,
+    model = extract_trainable_model(
+        ch=3 if rgb_only else 5,
+        weights_path=None,
+        device=device,
     )
-    evaluate_test_model(
-        test_loader,
-        extract_trainable_model(ch=3 if rgb_only else 5, weights_path=None, device=device),
-        device,
-        logger,
-        args.weights,
-        save_dir=log_directory / "test",
-    )
+
+    if args.benchmark:
+        benchmark_results = evaluate_degraded_benchmark(
+            dataset_path=args.dataset_path,
+            model=model,
+            device=device,
+            logger=logger,
+            checkpoint_path=args.weights,
+            rgb_only=rgb_only,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            max_samples=args.max_samples,
+            degradation_strength=args.degradation_strength,
+            evaluation_seed=args.evaluation_seed,
+        )
+
+        for line in format_benchmark_table(benchmark_results):
+            logger.info(line)
+
+        for condition, result in benchmark_results.items():
+            logger.info(
+                "%s fingerprint: %s",
+                condition,
+                result["fingerprint"],
+            )
+
+    else:
+        test_loader = create_test_loader(
+            args.dataset_path,
+            logger,
+            rgb_only=rgb_only,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            max_samples=args.max_samples,
+        )
+
+        evaluate_test_model(
+            test_loader,
+            model,
+            device,
+            logger,
+            args.weights,
+            save_dir=log_directory / "test",
+        )

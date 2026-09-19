@@ -57,7 +57,14 @@ class TrainRgbStudentTests(unittest.TestCase):
             dataset_class.call_args_list,
             [
                 call(dataset_path=Path("fake-dataset"), split="train", rgb_only=True),
-                call(dataset_path=Path("fake-dataset"), split="val", rgb_only=True),
+                call(
+                    dataset_path=Path("fake-dataset"),
+                    split="val",
+                    rgb_only=True,
+                    degradation="clean",
+                    degradation_strength=1.0,
+                    evaluation_seed=0,
+                ),
             ],
         )
 
@@ -126,8 +133,14 @@ class TrainRgbStudentTests(unittest.TestCase):
             for group in optimiser.param_groups
             for parameter in group["params"]
         }
-        unfrozen = {id(parameter) for parameter in model.parameters() if parameter.requires_grad}
-        frozen = {id(parameter) for parameter in model.parameters() if not parameter.requires_grad}
+        unfrozen = {
+            id(parameter) for parameter in model.parameters() if parameter.requires_grad
+        }
+        frozen = {
+            id(parameter)
+            for parameter in model.parameters()
+            if not parameter.requires_grad
+        }
         self.assertEqual(optimised, unfrozen)
         self.assertTrue(optimised.isdisjoint(frozen))
 
@@ -240,7 +253,9 @@ class TrainRgbStudentTests(unittest.TestCase):
         self.assertAlmostEqual(losses["l1_loss"], 0.3, places=6)
 
     def test_loss_schedule_moves_weight_to_one_to_one_head(self):
-        model = extract_trainable_model(ch=3, weights_path=None, device="cpu", epochs=10)
+        model = extract_trainable_model(
+            ch=3, weights_path=None, device="cpu", epochs=10
+        )
         set_loss_schedule(model, 0)
         self.assertAlmostEqual(model.criterion.o2m, 0.8)
         set_loss_schedule(model, 9)

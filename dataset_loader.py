@@ -1,6 +1,7 @@
 import argparse
 from functools import lru_cache
 from pathlib import Path
+import hashlib
 import cv2
 import h5py
 import hdf5plugin  # Required to prevent Blosc decompression error
@@ -11,12 +12,78 @@ from dsec_det.dataset import DSECDet
 from dsec_det.label import CLASSES, COLORS
 from dsec_det.io import extract_from_h5_by_timewindow, yaml_file_to_dict
 import logging
-from ultralytics import YOLO 
+from ultralytics import YOLO
 
 
-SPLIT_CONFIG_PATH = Path(__file__).resolve().parent / "DSEC-det" / "config" / "train_val_test_split.yaml"
+SPLIT_CONFIG_PATH = (
+    Path(__file__).resolve().parent
+    / "DSEC-det"
+    / "config"
+    / "train_val_test_split.yaml"
+)
 
 EVENT_WINDOW_US = 50_000
+
+
+def degradation_seed(
+    evaluation_seed: int,
+    sequence_name: str,
+    frame_index: int,
+    degradation: str,
+    strength: float,
+) -> int:
+    seed_input = (
+        f"{evaluation_seed}|{sequence_name}|{frame_index}|{degradation}|{strength}"
+    ).encode("utf-8")
+
+    digest = hashlib.sha256(seed_input).digest()
+    return int.from_bytes(digest[:8], byteorder="little", signed=False)
+
+
+def apply_dark_degradation(
+    image: np.ndarray,
+    strength: float,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    image_f = image.astype(np.float32)
+
+    # Darken the image first.
+    alpha = max(0.0, 1.0 - 0.7 * strength)
+    darkened = image_f * alpha
+
+    # Add deterministic per-frame noise.
+    noise_std = 25.0 * strength
+    noise = rng.normal(0.0, noise_std, size=image.shape).astype(np.float32)
+
+    degraded = darkened + noise
+    return np.clip(degraded, 0, 255).astype(np.uint8)
+
+
+def apply_overexposed_degradation(
+    image: np.ndarray,
+    strength: float,
+) -> np.ndarray:
+    image_f = image.astype(np.float32)
+
+    alpha = 1.0 + 0.8 * strength
+    beta = 30.0 * strength
+
+    degraded = image_f * alpha + beta
+    return np.clip(degraded, 0, 255).astype(np.uint8)
+
+
+def update_rgb_fingerprint(hasher, images: torch.Tensor) -> None:
+    rgb = images[:, :3].detach().cpu().contiguous().numpy()
+    hasher.update(rgb.tobytes())
+
+
+def rgb_loader_fingerprint(loader: DataLoader) -> str:
+    hasher = hashlib.sha256()
+
+    for images, _ in loader:
+        update_rgb_fingerprint(hasher, images)
+
+    return hasher.hexdigest()
 
 
 @lru_cache(maxsize=None)
@@ -26,7 +93,9 @@ def event_time_offset_us(event_file: str) -> int:
         return int(h5f["t_offset"][()])
 
 
-def load_causal_events(base_dataset: DSECDet, idx: int, window_us: int = EVENT_WINDOW_US) -> dict:
+def load_causal_events(
+    base_dataset: DSECDet, idx: int, window_us: int = EVENT_WINDOW_US
+) -> dict:
     """Events from the `window_us` microseconds up to the image timestamp, never after it.
 
     Real-time detection only has past events when an image arrives. DSECDet's own event windows
@@ -43,21 +112,36 @@ def load_causal_events(base_dataset: DSECDet, idx: int, window_us: int = EVENT_W
 
 
 class DSECFusionDataset(Dataset):
-    def __init__(self, dataset_path, split="train", rgb_only=False): 
+    def __init__(
+        self,
+        dataset_path,
+        split="train",
+        rgb_only=False,
+        degradation="clean",
+        degradation_strength=1.0,
+        evaluation_seed=0,
+    ):
         split_config = yaml_file_to_dict(SPLIT_CONFIG_PATH)
 
         self.base_dataset = DSECDet(
-            dataset_path, 
-            split=split, 
-            sync="back", 
-            split_config=split_config
+            dataset_path, split=split, sync="back", split_config=split_config
         )
         self.rgb_only = rgb_only
+
+        valid_degradations = {"clean", "dark", "overexposed"}
+        if degradation not in valid_degradations:
+            raise ValueError(f"degradation must be one of {sorted(valid_degradations)}")
+
+        if degradation_strength < 0:
+            raise ValueError("degradation_strength must be non-negative")
+        self.degradation = degradation
+        self.degradation_strength = degradation_strength
+        self.evaluation_seed = evaluation_seed
 
     def __len__(self):
         return len(self.base_dataset)
 
-    def generate_event_histogram(self, events, height=480, width=640):        
+    def generate_event_histogram(self, events, height=480, width=640):
         hist = np.zeros((2, height, width), dtype=np.float32)
 
         if events is not None and len(events.get("x", [])) > 0:
@@ -85,6 +169,32 @@ class DSECFusionDataset(Dataset):
 
         # RGB Image: cv2 loads BGR, but the pretrained YOLO weights expect RGB
         image = cv2.cvtColor(sample["image"], cv2.COLOR_BGR2RGB)
+
+        if self.degradation != "clean":
+            frame_index, _, directory = self.base_dataset.rel_index(idx)
+            sequence_name = directory.name
+
+            frame_seed = degradation_seed(
+                evaluation_seed=self.evaluation_seed,
+                sequence_name=sequence_name,
+                frame_index=frame_index,
+                degradation=self.degradation,
+                strength=self.degradation_strength,
+            )
+
+            if self.degradation == "dark":
+                rng = np.random.default_rng(frame_seed)
+                image = apply_dark_degradation(
+                    image,
+                    strength=self.degradation_strength,
+                    rng=rng,
+                )
+            elif self.degradation == "overexposed":
+                image = apply_overexposed_degradation(
+                    image,
+                    strength=self.degradation_strength,
+                )
+
         h, w = image.shape[0], image.shape[1]
         img_tensor = torch.from_numpy(image).permute(2, 0, 1).float() / 255.0
 
@@ -93,15 +203,15 @@ class DSECFusionDataset(Dataset):
         for box in sample["tracks"]:
             cls_id = int(box["class_id"])
             box_x, box_y, box_w, box_h = box["x"], box["y"], box["w"], box["h"]
-            
+
             # Calculate center points and normalize
             x_center = (box_x + box_w / 2.0) / w
             y_center = (box_y + box_h / 2.0) / h
             norm_w = box_w / w
             norm_h = box_h / h
-            
+
             yolo_targets.append([cls_id, x_center, y_center, norm_w, norm_h])
-            
+
         # Convert to a PyTorch tensor
         target_tensor = torch.tensor(yolo_targets, dtype=torch.float32)
 
@@ -114,25 +224,26 @@ class DSECFusionDataset(Dataset):
             fused_tensor = torch.cat((img_tensor, event_tensor), dim=0)
             return fused_tensor, target_tensor
 
+
 def yolo_collate_fn(batch):
     """Collate function for RGB-only YOLO training."""
     imgs, targets = zip(*batch)
-    
+
     # Stack images into a standard batch tensor
     imgs = torch.stack(imgs, 0)
-    
+
     # Add the batch index to the targets
     targets_with_idx = []
     for i, target in enumerate(targets):
         if target.shape[0] > 0:
             batch_idx = torch.full((target.shape[0], 1), i, dtype=target.dtype)
             targets_with_idx.append(torch.cat((batch_idx, target), dim=1))
-            
+
     if len(targets_with_idx) > 0:
-        targets = torch.cat(targets_with_idx, 0) # Shape: [Total_Boxes, 6]
+        targets = torch.cat(targets_with_idx, 0)  # Shape: [Total_Boxes, 6]
     else:
         targets = torch.empty((0, 6))
-        
+
     return imgs, targets
 
 
@@ -157,7 +268,9 @@ def sequence_names(dataset: Dataset) -> list[str]:
     return names
 
 
-def _check_loader_settings(logger: logging.Logger, batch_size: int, num_workers: int) -> None:
+def _check_loader_settings(
+    logger: logging.Logger, batch_size: int, num_workers: int
+) -> None:
     if not 1 <= batch_size <= 32:
         message = "batch_size must be between 1 and 32"
         logger.error(message)
@@ -176,6 +289,9 @@ def create_dataloaders(
     batch_size: int = 4,
     num_workers: int = 0,
     max_samples: int | None = None,
+    degradation: str = "clean",
+    degradation_strength: float = 1.0,
+    evaluation_seed: int = 0,
 ) -> tuple[DataLoader, DataLoader]:
     """Create reproducible training and validation Dataloaders using explicit sequence splits.
 
@@ -184,17 +300,22 @@ def create_dataloaders(
     """
     _check_loader_settings(logger, batch_size, num_workers)
 
-    train_dataset = limit_dataset(DSECFusionDataset(
-        dataset_path=dataset_path,
-        split="train",
-        rgb_only=rgb_only
-    ), max_samples)
+    train_dataset = limit_dataset(
+        DSECFusionDataset(dataset_path=dataset_path, split="train", rgb_only=rgb_only),
+        max_samples,
+    )
 
-    val_dataset = limit_dataset(DSECFusionDataset(
-        dataset_path=dataset_path,
-        split="val",
-        rgb_only=rgb_only
-    ), max_samples)
+    val_dataset = limit_dataset(
+        DSECFusionDataset(
+            dataset_path=dataset_path,
+            split="val",
+            rgb_only=rgb_only,
+            degradation=degradation,
+            degradation_strength=degradation_strength,
+            evaluation_seed=evaluation_seed,
+        ),
+        max_samples,
+    )
 
     train_loader = DataLoader(
         train_dataset,
@@ -226,6 +347,9 @@ def create_test_loader(
     batch_size: int = 4,
     num_workers: int = 0,
     max_samples: int | None = None,
+    degradation: str = "clean",
+    degradation_strength: float = 1.0,
+    evaluation_seed: int = 0,
 ) -> DataLoader:
     _check_loader_settings(logger, batch_size, num_workers)
 
@@ -233,6 +357,9 @@ def create_test_loader(
         dataset_path=dataset_path,
         split="test",
         rgb_only=rgb_only,
+        degradation=degradation,
+        degradation_strength=degradation_strength,
+        evaluation_seed=evaluation_seed,
     )
     if len(test_dataset) == 0:
         message = "The test split is empty; provide a labelled test dataset."
@@ -251,11 +378,15 @@ def create_test_loader(
     )
 
 
-def create_rgb_dataloaders(dataset_path: Path, logger: logging.Logger, **kwargs) -> tuple[DataLoader, DataLoader]:
+def create_rgb_dataloaders(
+    dataset_path: Path, logger: logging.Logger, **kwargs
+) -> tuple[DataLoader, DataLoader]:
     """RGB only training and validation Dataloaders for the student."""
     return create_dataloaders(dataset_path, logger, rgb_only=True, **kwargs)
 
 
-def create_rgb_test_loader(dataset_path: Path, logger: logging.Logger, **kwargs) -> DataLoader:
+def create_rgb_test_loader(
+    dataset_path: Path, logger: logging.Logger, **kwargs
+) -> DataLoader:
     """RGB only test DataLoader for the student."""
     return create_test_loader(dataset_path, logger, rgb_only=True, **kwargs)
