@@ -40,6 +40,38 @@ def degradation_seed(
     return int.from_bytes(digest[:8], byteorder="little", signed=False)
 
 
+def apply_dark_degradation(
+    image: np.ndarray,
+    strength: float,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    image_f = image.astype(np.float32)
+
+    # Darken the image first.
+    alpha = max(0.0, 1.0 - 0.7 * strength)
+    darkened = image_f * alpha
+
+    # Add deterministic per-frame noise.
+    noise_std = 25.0 * strength
+    noise = rng.normal(0.0, noise_std, size=image.shape).astype(np.float32)
+
+    degraded = darkened + noise
+    return np.clip(degraded, 0, 255).astype(np.uint8)
+
+
+def apply_overexposed_degradation(
+    image: np.ndarray,
+    strength: float,
+) -> np.ndarray:
+    image_f = image.astype(np.float32)
+
+    alpha = 1.0 + 0.8 * strength
+    beta = 30.0 * strength
+
+    degraded = image_f * alpha + beta
+    return np.clip(degraded, 0, 255).astype(np.uint8)
+
+
 def update_rgb_fingerprint(hasher, images: torch.Tensor) -> None:
     rgb = images[:, :3].detach().cpu().contiguous().numpy()
     hasher.update(rgb.tobytes())
@@ -149,6 +181,19 @@ class DSECFusionDataset(Dataset):
                 degradation=self.degradation,
                 strength=self.degradation_strength,
             )
+
+            if self.degradation == "dark":
+                rng = np.random.default_rng(frame_seed)
+                image = apply_dark_degradation(
+                    image,
+                    strength=self.degradation_strength,
+                    rng=rng,
+                )
+            elif self.degradation == "overexposed":
+                image = apply_overexposed_degradation(
+                    image,
+                    strength=self.degradation_strength,
+                )
 
         h, w = image.shape[0], image.shape[1]
         img_tensor = torch.from_numpy(image).permute(2, 0, 1).float() / 255.0

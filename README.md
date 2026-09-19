@@ -237,7 +237,7 @@ Both models use the stock Ultralytics YOLO26n architecture with an 8-class DSEC 
 
 The evaluation loads the saved checkpoint and evaluates it on the test split with the same function used during training, writing metrics to the log and plots to the run's `test/` folder.
 
-## Degraded evaluation benchmark
+### Degraded evaluation benchmark
 
 The degraded evaluation benchmark compares a trained checkpoint on the same test frames under three conditions:
 
@@ -255,6 +255,13 @@ PYTHONPATH=. python evaluate.py \
   --benchmark \
   --degradation-strength 1.0 \
   --evaluation-seed 42
+```
+
+The benchmark reports mAP@0.5, mAP@0.5:0.95, recall, and the performance drop from the clean condition.
+
+The evaluation seed keeps benchmark inputs reproducible. Each condition also produces an RGB fingerprint, which can be compared between runs to confirm that the same input images were evaluated.
+
+For fair comparisons between models, use the same dataset split, degradation settings, evaluation seed, and benchmark configuration.
 
 ## Dataset and training notes
 
@@ -270,7 +277,7 @@ Run the unit and integration checks from the repository root:
 
 ```bash
 python -m unittest discover -s tests -v
-````
+```
 
 The test suite covers the project’s expected data-loading and training workflow behaviour.
 

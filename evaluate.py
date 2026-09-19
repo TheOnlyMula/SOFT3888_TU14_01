@@ -347,9 +347,13 @@ def evaluate_degraded_benchmark(
         results[condition]["map50_95_drop"] = (
             clean["map50_95"] - results[condition]["map50_95"]
         )
+        results[condition]["recall_drop"] = (
+            clean["recall"] - results[condition]["recall"]
+        )
 
     results["clean"]["map50_drop"] = 0.0
     results["clean"]["map50_95_drop"] = 0.0
+    results["clean"]["recall_drop"] = 0.0
 
     return results
 
@@ -362,6 +366,7 @@ def format_benchmark_table(results: dict[str, dict]) -> list[str]:
         f"{'Recall':>10}"
         f"{'mAP50 Drop':>12}"
         f"{'mAP50-95 Drop':>15}"
+        f"{'Recall Drop':>13}"
     )
 
     lines = [header]
@@ -375,6 +380,7 @@ def format_benchmark_table(results: dict[str, dict]) -> list[str]:
             f"{row['recall']:>10.3f}"
             f"{row['map50_drop']:>12.3f}"
             f"{row['map50_95_drop']:>15.3f}"
+            f"{row['recall_drop']:>13.3f}"
         )
 
     return lines
