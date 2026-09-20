@@ -1,0 +1,150 @@
+{
+  "status": "reference_sample_observations_not_dataset_wide_acceptance",
+  "module_sha256": "9659b2be3768302c9c6f9e49fce99c1ae3695ad18800683139aa03e6e1d654ed",
+  "strength_levels": {
+    "mild": 0.35,
+    "strong": 1.0
+  },
+  "min_gamma": 0.4,
+  "max_brightness_offset": 0.6,
+  "fully_saturated_definition": "All three RGB channels equal 255; denominator is every pixel",
+  "proposed_night_reference_floor_percent": 2.0,
+  "calibration_note": "Floor selected after inspecting these four named night reference frames; not held-out validation.",
+  "samples": [
+    {
+      "image_path": "train/thun_00_a/images/left/distorted/000007.png",
+      "image_sha256": "efe0da8c524e6bf7ac902f4669b9bc7c44177793137dddd8fe5569e8a77a458b",
+      "shape": [
+        480,
+        640,
+        3
+      ],
+      "metrics": {
+        "clean": {
+          "mean_rgb": 65.99086154513888,
+          "fully_saturated_percent": 0.0,
+          "any_channel_saturated_percent": 0.0
+        },
+        "mild": {
+          "mean_rgb": 131.74829535590277,
+          "fully_saturated_percent": 5.538411458333333,
+          "any_channel_saturated_percent": 19.815104166666668
+        },
+        "strong": {
+          "mean_rgb": 244.47577039930556,
+          "fully_saturated_percent": 64.16015625,
+          "any_channel_saturated_percent": 73.46028645833333
+        }
+      }
+    },
+    {
+      "image_path": "train/zurich_city_09_a/images/left/distorted/000007.png",
+      "image_sha256": "5d8dd30427f3ef798eed329c20a541c43ff0dc8a50c08bc11842d4a56ae9860b",
+      "shape": [
+        480,
+        640,
+        3
+      ],
+      "metrics": {
+        "clean": {
+          "mean_rgb": 18.23935329861111,
+          "fully_saturated_percent": 0.05989583333333333,
+          "any_channel_saturated_percent": 0.21712239583333331
+        },
+        "mild": {
+          "mean_rgb": 83.46577256944444,
+          "fully_saturated_percent": 0.13118489583333331,
+          "any_channel_saturated_percent": 0.3544921875
+        },
+        "strong": {
+          "mean_rgb": 230.13146918402776,
+          "fully_saturated_percent": 5.427408854166667,
+          "any_channel_saturated_percent": 28.277994791666668
+        }
+      }
+    },
+    {
+      "image_path": "train/zurich_city_09_a/images/left/distorted/000100.png",
+      "image_sha256": "672dbbbe3ed08a61385776a9edd5428f59d700991a59557349388ba58d47f398",
+      "shape": [
+        480,
+        640,
+        3
+      ],
+      "metrics": {
+        "clean": {
+          "mean_rgb": 20.24109375,
+          "fully_saturated_percent": 0.008138020833333332,
+          "any_channel_saturated_percent": 0.6432291666666667
+        },
+        "mild": {
+          "mean_rgb": 85.03529296875,
+          "fully_saturated_percent": 0.021484375,
+          "any_channel_saturated_percent": 1.6334635416666667
+        },
+        "strong": {
+          "mean_rgb": 229.22888346354168,
+          "fully_saturated_percent": 6.473307291666666,
+          "any_channel_saturated_percent": 30.138020833333336
+        }
+      }
+    },
+    {
+      "image_path": "train/zurich_city_09_a/images/left/distorted/000200.png",
+      "image_sha256": "d8a53b12b50a796089095ad0a27deb4ce8f41ec0aa7b6ebd27c33e7ab484e847",
+      "shape": [
+        480,
+        640,
+        3
+      ],
+      "metrics": {
+        "clean": {
+          "mean_rgb": 18.99571506076389,
+          "fully_saturated_percent": 0.040364583333333336,
+          "any_channel_saturated_percent": 0.2275390625
+        },
+        "mild": {
+          "mean_rgb": 84.60915364583333,
+          "fully_saturated_percent": 0.1025390625,
+          "any_channel_saturated_percent": 0.4443359375
+        },
+        "strong": {
+          "mean_rgb": 232.23218098958333,
+          "fully_saturated_percent": 3.7483723958333335,
+          "any_channel_saturated_percent": 30.4931640625
+        }
+      }
+    },
+    {
+      "image_path": "train/zurich_city_09_a/images/left/distorted/000300.png",
+      "image_sha256": "7bc6e6909e07ec5cdb96c37c7ea101943821b2aa05440a0dbe9ce42549c59081",
+      "shape": [
+        480,
+        640,
+        3
+      ],
+      "metrics": {
+        "clean": {
+          "mean_rgb": 15.069730902777778,
+          "fully_saturated_percent": 0.0016276041666666667,
+          "any_channel_saturated_percent": 0.07194010416666667
+        },
+        "mild": {
+          "mean_rgb": 79.26383029513889,
+          "fully_saturated_percent": 0.0224609375,
+          "any_channel_saturated_percent": 0.2864583333333333
+        },
+        "strong": {
+          "mean_rgb": 225.71430121527777,
+          "fully_saturated_percent": 2.84375,
+          "any_channel_saturated_percent": 16.784505208333332
+        }
+      }
+    }
+  ],
+  "runtime": {
+    "python": "3.14.7",
+    "numpy": "2.5.2",
+    "opencv": "4.13.0"
+  }
+}

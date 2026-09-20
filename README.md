@@ -312,3 +312,35 @@ If training or evaluation fails, check the following first:
 5. Check that the environment matches the required Python and dependency versions.
 
 This project is meant to serve as a full training and evaluation workflow for DSEC-based RGB and RGB + event detection experiments. It is especially useful for experimenting with student–teacher knowledge transfer and multi-modal perception pipelines in a structured and reproducible setup.
+
+## Deterministic overexposure (Issue #41)
+
+`overexpose(image, strength)` returns a new, same-shape `uint8` RGB array
+without randomness or input mutation. Input is a non-empty `H x W x 3` array;
+convert BGR to RGB and apply it before tensor normalization or event concatenation.
+
+```python
+from overexposure import overexpose
+mild_rgb = overexpose(rgb, "mild")
+strong_rgb = overexpose(rgb, "strong")
+custom_rgb = overexpose(rgb, 0.6)  # Continuous strength in [0, 1].
+```
+
+| Preset | Strength | Gamma | Normalized offset |
+| --- | ---: | ---: | ---: |
+| mild | 0.35 | 0.79 | 0.21 |
+| strong | 1.00 | 0.40 | 0.60 |
+
+The proposed `strong` target is **at least 2% fully saturated pixels** (all RGB
+channels equal 255) on `zurich_city_09_a` frames `000007`, `000100`, `000200`
+and `000300`. This target applies only to these calibration frames.
+
+[Day examples](docs/overexposure/day_000007.png) and
+[night examples](docs/overexposure/night_000300.png) show clean/mild/strong.
+See the [detailed guide](docs/overexposure/README.md) for the formula and measured results.
+
+Generate examples and descriptive measurements into a new output directory:
+
+```bash
+python tools/generate_overexposure_examples.py --image "/path/to/rgb.png" --output-dir "runs/issue41_examples/sample_01"
+```
