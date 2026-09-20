@@ -9,7 +9,12 @@ import torch
 from torch.utils.data import DataLoader
 from ultralytics.models.yolo.detect import DetectionValidator
 from ultralytics.utils.metrics import DetMetrics
-from dataset_loader import create_test_loader, rgb_loader_fingerprint
+from dataset_loader import (
+    create_test_loader,
+    resolve_degradation_strength,
+    rgb_loader_fingerprint,
+)
+from overexposure import STRENGTH_LEVELS
 from utils import extract_trainable_model
 
 
@@ -294,6 +299,14 @@ def evaluate_test_model(
     return results
 
 
+def degradation_strength_argument(value: str) -> float:
+    """Accept a named level or a number on the command line."""
+    try:
+        return resolve_degradation_strength(value if value in STRENGTH_LEVELS else float(value))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
 def evaluate_degraded_benchmark(
     dataset_path: Path,
     model: torch.nn.Module,
@@ -304,7 +317,7 @@ def evaluate_degraded_benchmark(
     batch_size: int = 16,
     num_workers: int = 8,
     max_samples: int | None = None,
-    degradation_strength: float = 1.0,
+    degradation_strength: str | float = 1.0,
     evaluation_seed: int = 0,
 ) -> dict[str, dict]:
     conditions = ("clean", "dark", "overexposed")
@@ -412,7 +425,12 @@ if __name__ == "__main__":
         action="store_true",
         help="Evaluate clean, dark and overexposed benchmark conditions.",
     )
-    parser.add_argument("--degradation-strength", type=float, default=1.0)
+    parser.add_argument(
+        "--degradation-strength",
+        type=degradation_strength_argument,
+        default=1.0,
+        help='Degradation strength: "mild", "strong", or a number in [0, 1].',
+    )
     parser.add_argument("--evaluation-seed", type=int, default=0)
     args = parser.parse_args()
 

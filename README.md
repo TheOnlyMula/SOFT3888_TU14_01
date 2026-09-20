@@ -253,11 +253,13 @@ PYTHONPATH=. python evaluate.py \
   --type student \
   --dataset-path "/path/to/DSEC_ROOT" \
   --benchmark \
-  --degradation-strength 1.0 \
+  --degradation-strength strong \
   --evaluation-seed 42
 ```
 
 The benchmark reports mAP@0.5, mAP@0.5:0.95, recall, and the performance drop from the clean condition.
+
+`--degradation-strength` accepts the named levels `mild` (0.35) and `strong` (1.0) defined in `overexposure.py`, or a number in [0, 1]. The same value is used for the darkened and over-exposed conditions, and over-exposure is applied by `overexposure.overexpose`.
 
 The evaluation seed keeps benchmark inputs reproducible. Each condition also produces an RGB fingerprint, which can be compared between runs to confirm that the same input images were evaluated.
 

@@ -11,6 +11,7 @@ from torch.utils.data import Dataset, DataLoader, Subset
 from dsec_det.dataset import DSECDet
 from dsec_det.label import CLASSES, COLORS
 from dsec_det.io import extract_from_h5_by_timewindow, yaml_file_to_dict
+from overexposure import STRENGTH_LEVELS, overexpose
 import logging
 from ultralytics import YOLO
 
@@ -45,6 +46,8 @@ def apply_dark_degradation(
     strength: float,
     rng: np.random.Generator,
 ) -> np.ndarray:
+    """Temporary darkening, to be replaced by the darkening module.
+    """
     image_f = image.astype(np.float32)
 
     # Darken the image first.
@@ -59,17 +62,23 @@ def apply_dark_degradation(
     return np.clip(degraded, 0, 255).astype(np.uint8)
 
 
-def apply_overexposed_degradation(
-    image: np.ndarray,
-    strength: float,
-) -> np.ndarray:
-    image_f = image.astype(np.float32)
+def resolve_degradation_strength(strength: str | float) -> float:
+    """Turn a named level ("mild"/"strong") into its number; pass through a value in [0, 1].
 
-    alpha = 1.0 + 0.8 * strength
-    beta = 30.0 * strength
+    Both degradations share this scale, and the resolved number goes into the per-frame seed,
+    so "strong" and 1.0 describe the same benchmark.
+    """
+    if isinstance(strength, str):
+        if strength not in STRENGTH_LEVELS:
+            raise ValueError(
+                f"degradation strength must be a number in [0, 1] or one of {sorted(STRENGTH_LEVELS)}"
+            )
+        return STRENGTH_LEVELS[strength]
 
-    degraded = image_f * alpha + beta
-    return np.clip(degraded, 0, 255).astype(np.uint8)
+    value = float(strength)
+    if not 0.0 <= value <= 1.0:
+        raise ValueError("degradation_strength must be between 0 and 1")
+    return value
 
 
 def update_rgb_fingerprint(hasher, images: torch.Tensor) -> None:
@@ -132,10 +141,8 @@ class DSECFusionDataset(Dataset):
         if degradation not in valid_degradations:
             raise ValueError(f"degradation must be one of {sorted(valid_degradations)}")
 
-        if degradation_strength < 0:
-            raise ValueError("degradation_strength must be non-negative")
         self.degradation = degradation
-        self.degradation_strength = degradation_strength
+        self.degradation_strength = resolve_degradation_strength(degradation_strength)
         self.evaluation_seed = evaluation_seed
 
     def __len__(self):
@@ -170,30 +177,24 @@ class DSECFusionDataset(Dataset):
         # RGB Image: cv2 loads BGR, but the pretrained YOLO weights expect RGB
         image = cv2.cvtColor(sample["image"], cv2.COLOR_BGR2RGB)
 
-        if self.degradation != "clean":
+        if self.degradation == "dark":
+            # Only darkening is random, so only it needs a per-frame seed.
+            # The darkening module will replace apply_dark_degradation here.
             frame_index, _, directory = self.base_dataset.rel_index(idx)
-            sequence_name = directory.root.name
-
             frame_seed = degradation_seed(
                 evaluation_seed=self.evaluation_seed,
-                sequence_name=sequence_name,
+                sequence_name=directory.root.name,
                 frame_index=frame_index,
                 degradation=self.degradation,
                 strength=self.degradation_strength,
             )
-
-            if self.degradation == "dark":
-                rng = np.random.default_rng(frame_seed)
-                image = apply_dark_degradation(
-                    image,
-                    strength=self.degradation_strength,
-                    rng=rng,
-                )
-            elif self.degradation == "overexposed":
-                image = apply_overexposed_degradation(
-                    image,
-                    strength=self.degradation_strength,
-                )
+            image = apply_dark_degradation(
+                image,
+                strength=self.degradation_strength,
+                rng=np.random.default_rng(frame_seed),
+            )
+        elif self.degradation == "overexposed":
+            image = overexpose(image, self.degradation_strength)
 
         h, w = image.shape[0], image.shape[1]
         img_tensor = torch.from_numpy(image).permute(2, 0, 1).float() / 255.0
