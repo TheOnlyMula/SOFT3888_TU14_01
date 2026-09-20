@@ -172,7 +172,7 @@ class DSECFusionDataset(Dataset):
 
         if self.degradation != "clean":
             frame_index, _, directory = self.base_dataset.rel_index(idx)
-            sequence_name = directory.name
+            sequence_name = directory.root.name
 
             frame_seed = degradation_seed(
                 evaluation_seed=self.evaluation_seed,
