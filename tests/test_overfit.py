@@ -1,3 +1,4 @@
+import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -16,6 +17,22 @@ class OverfitTests(unittest.TestCase):
         self.assertEqual(loader.dataset.indices, [0, 12, 25, 37, 50, 62, 75, 87])
         self.assertIsInstance(loader.sampler, SequentialSampler)
         self.assertEqual(loader.batch_size, 4)
+
+    @patch("overfit.train_model")
+    @patch("overfit.create_optimiser")
+    @patch("overfit.extract_trainable_model")
+    @patch("overfit.log")
+    @patch("overfit.tiny_loader")
+    def test_trains_and_validates_on_the_same_loader(self, tiny_loader, *_):
+        argv = ["overfit.py", "--dataset-path", "data", "--epochs", "50"]
+        with patch.object(sys, "argv", argv):
+            overfit.main()
+
+        tiny_loader.assert_called_once_with(Path("data"), 8, 4)
+        args, kwargs = overfit.train_model.call_args
+        self.assertIs(args[0], tiny_loader.return_value)
+        self.assertIs(args[1], tiny_loader.return_value)
+        self.assertEqual(kwargs["total_epochs"], 50)
 
 
 if __name__ == "__main__":
