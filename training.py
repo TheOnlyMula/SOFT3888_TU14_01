@@ -19,6 +19,7 @@ import torch
 from torch.utils.data import DataLoader
 from evaluate import validate_model, evaluate_test_model, _prepare_yolo_batch
 from dataset_loader import create_dataloaders, create_test_loader, sequence_names
+from dataset_loader import DEFAULT_DEGRADATION_SHARES, validate_degradation_shares
 from distillation import feature_distillation_loss, load_teacher
 from ultralytics.utils.torch_utils import ModelEMA
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -260,6 +261,15 @@ def parse_args(description: str) -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--epochs", type=int, default=1, help="Total number of epochs to train.")
     parser.add_argument(
+        "--degradation-augmentation", action="store_true",
+        help="Randomly mix clean, dark and overexposed images for RGB-only student training.",
+    )
+    parser.add_argument(
+        "--degradation-shares", type=float, nargs=3,
+        metavar=("CLEAN", "DARK", "OVEREXPOSED"), default=DEFAULT_DEGRADATION_SHARES,
+        help="Condition probabilities summing to 1 (default: 0.5 0.25 0.25).",
+    )
+    parser.add_argument(
         "--skip-test", action="store_true",
         help="Run training and validation only; do not run final eval step.",
     )
@@ -282,6 +292,10 @@ def parse_args(description: str) -> argparse.Namespace:
         help = "Set the logging level.",
     )
     args = parser.parse_args()
+    try:
+        args.degradation_shares = validate_degradation_shares(args.degradation_shares)
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.max_samples is not None and args.max_samples < 1:
         parser.error("--max-samples must be positive")
     if args.lambda_distill < 0:
@@ -296,6 +310,8 @@ def main(role: str, rgb_only: bool) -> None:
         else "Train and validate the RGB + event teacher model."
     )
     args = parse_args(description)
+    if args.degradation_augmentation and (not rgb_only or args.teacher_checkpoint is not None):
+        raise ValueError("--degradation-augmentation only applies to RGB-only training without a teacher")
 
     log_directory = log.create_log_directory(role)
 
@@ -329,7 +345,12 @@ def main(role: str, rgb_only: bool) -> None:
         num_workers = args.num_workers,
         max_samples = args.max_samples,
     )
-    train_loader, val_loader = create_dataloaders(rgb_only=rgb_only, **loader_settings)
+    augmentation_settings = (
+        {"augmentation_shares": args.degradation_shares} if args.degradation_augmentation else {}
+    )
+    train_loader, val_loader = create_dataloaders(
+        rgb_only=rgb_only, **loader_settings, **augmentation_settings,
+    )
     if distilling:
         # The teacher needs the paired event channels, so training re-reads with events while
         # validation keeps the RGB-only loader built above.

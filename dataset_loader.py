@@ -30,6 +30,27 @@ EVENT_WINDOW_US = 50_000
 # It is the 99.9th percentile of non-zero per-pixel event counts, measured by tools/measure_event_scale.py
 EVENT_SCALE_K = 44.0
 
+DEFAULT_DEGRADATION_SHARES = (0.5, 0.25, 0.25)
+
+
+def validate_degradation_shares(shares):
+    """Validate probabilities ordered as clean, dark, overexposed."""
+    shares = tuple(float(value) for value in shares)
+    if (len(shares) != 3 or any(not math.isfinite(p) or p < 0 for p in shares)
+            or not math.isclose(sum(shares), 1.0, rel_tol=0, abs_tol=1e-8)):
+        raise ValueError("degradation shares must be three finite non-negative values summing to 1")
+    return shares
+
+
+def augment_rgb_degradation(image, shares):
+    """Independently sample a condition on each access, at fixed strong strength."""
+    condition = np.random.choice(("clean", "dark", "overexposed"), p=shares)
+    if condition == "dark":
+        return apply_dark_degradation(image, strength=1.0, rng=np.random)
+    if condition == "overexposed":
+        return overexpose(image, 1.0)
+    return image
+
 
 def degradation_seed(
     evaluation_seed: int,
@@ -134,7 +155,13 @@ class DSECFusionDataset(Dataset):
         degradation="clean",
         degradation_strength=1.0,
         evaluation_seed=0,
+        augmentation_shares=None,
     ):
+        self.augmentation_shares = None
+        if augmentation_shares is not None:
+            if split != "train" or not rgb_only or degradation != "clean":
+                raise ValueError("degradation augmentation requires clean RGB-only training data")
+            self.augmentation_shares = validate_degradation_shares(augmentation_shares)
         split_config = yaml_file_to_dict(SPLIT_CONFIG_PATH)
 
         self.base_dataset = DSECDet(
@@ -182,7 +209,9 @@ class DSECFusionDataset(Dataset):
         # RGB Image: cv2 loads BGR, but the pretrained YOLO weights expect RGB
         image = cv2.cvtColor(sample["image"], cv2.COLOR_BGR2RGB)
 
-        if self.degradation == "dark":
+        if self.augmentation_shares is not None:
+            image = augment_rgb_degradation(image, self.augmentation_shares)
+        elif self.degradation == "dark":
             # Only darkening is random, so only it needs a per-frame seed.
             # The darkening module will replace apply_dark_degradation here.
             frame_index, _, directory = self.base_dataset.rel_index(idx)
@@ -298,6 +327,7 @@ def create_dataloaders(
     degradation: str = "clean",
     degradation_strength: float = 1.0,
     evaluation_seed: int = 0,
+    augmentation_shares: tuple[float, float, float] | None = None,
 ) -> tuple[DataLoader, DataLoader]:
     """Create reproducible training and validation Dataloaders using explicit sequence splits.
 
@@ -307,7 +337,10 @@ def create_dataloaders(
     _check_loader_settings(logger, batch_size, num_workers)
 
     train_dataset = limit_dataset(
-        DSECFusionDataset(dataset_path=dataset_path, split="train", rgb_only=rgb_only),
+        DSECFusionDataset(
+            dataset_path=dataset_path, split="train", rgb_only=rgb_only,
+            **({"augmentation_shares": augmentation_shares} if augmentation_shares is not None else {}),
+        ),
         max_samples,
     )
 

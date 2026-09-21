@@ -202,6 +202,25 @@ The script does the following:
 - saves the model with the lowest validation loss,
 - runs a final test evaluation unless `--skip-test` is provided.
 
+Enable a random degradation mix for RGB-only student training:
+
+```bash
+python train_rgb_student.py \
+  --dataset-path "/path/to/DSEC_ROOT" \
+  --epochs 10 \
+  --degradation-augmentation \
+  --degradation-shares 0.5 0.25 0.25
+```
+
+Augmentation is off by default. Shares are probabilities in clean, darkened,
+over-exposed order; they must be non-negative and sum to 1. The default is
+50%/25%/25%. Each training image independently draws a fresh condition on every
+load, so batch and epoch proportions fluctuate. Validation and test loaders keep
+their existing behavior. This initial implementation uses fixed strength 1.0
+and the existing temporary darkening function; random strength ranges and a
+dedicated augmentation seed are not implemented yet. This option is for the
+RGB-only student without a teacher checkpoint.
+
 ### Teacher RGB + event training
 
 The teacher runs exactly the same pipeline as the student (training, validation, test loss and mAP), but its input tensor also contains the event histogram.
