@@ -19,7 +19,10 @@ import torch
 from torch.utils.data import DataLoader
 from evaluate import validate_model, evaluate_test_model, _prepare_yolo_batch
 from dataset_loader import create_dataloaders, create_test_loader, sequence_names
-from dataset_loader import DEFAULT_DEGRADATION_SHARES, validate_degradation_shares
+from dataset_loader import (
+    DEFAULT_DEGRADATION_SHARES, DEFAULT_STRENGTH_RANGE, DEFAULT_AUGMENTATION_SEED,
+    validate_degradation_shares, validate_strength_range, validate_augmentation_seed,
+)
 from distillation import feature_distillation_loss, load_teacher
 from ultralytics.utils.torch_utils import ModelEMA
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -265,9 +268,23 @@ def parse_args(description: str) -> argparse.Namespace:
         help="Randomly mix clean, dark and overexposed images for RGB-only student training.",
     )
     parser.add_argument(
+        "--augmentation-seed", type=int, default=DEFAULT_AUGMENTATION_SEED,
+        help="Non-negative seed for training augmentation only (default: 0); independent of evaluation.",
+    )
+    parser.add_argument(
         "--degradation-shares", type=float, nargs=3,
         metavar=("CLEAN", "DARK", "OVEREXPOSED"), default=DEFAULT_DEGRADATION_SHARES,
         help="Condition probabilities summing to 1 (default: 0.5 0.25 0.25).",
+    )
+    parser.add_argument(
+        "--dark-strength-range", type=float, nargs=2, metavar=("MIN", "MAX"),
+        default=DEFAULT_STRENGTH_RANGE,
+        help="Uniform training darkening strength range in [0, 1] (default: 0.35 1.0).",
+    )
+    parser.add_argument(
+        "--overexposed-strength-range", type=float, nargs=2, metavar=("MIN", "MAX"),
+        default=DEFAULT_STRENGTH_RANGE,
+        help="Uniform training over-exposure strength range in [0, 1] (default: 0.35 1.0).",
     )
     parser.add_argument(
         "--skip-test", action="store_true",
@@ -293,7 +310,10 @@ def parse_args(description: str) -> argparse.Namespace:
     )
     args = parser.parse_args()
     try:
+        args.augmentation_seed = validate_augmentation_seed(args.augmentation_seed)
         args.degradation_shares = validate_degradation_shares(args.degradation_shares)
+        args.dark_strength_range = validate_strength_range(args.dark_strength_range)
+        args.overexposed_strength_range = validate_strength_range(args.overexposed_strength_range)
     except ValueError as exc:
         parser.error(str(exc))
     if args.max_samples is not None and args.max_samples < 1:
@@ -346,7 +366,12 @@ def main(role: str, rgb_only: bool) -> None:
         max_samples = args.max_samples,
     )
     augmentation_settings = (
-        {"augmentation_shares": args.degradation_shares} if args.degradation_augmentation else {}
+        {
+            "augmentation_shares": args.degradation_shares,
+            "dark_strength_range": args.dark_strength_range,
+            "overexposed_strength_range": args.overexposed_strength_range,
+            "augmentation_seed": args.augmentation_seed,
+        } if args.degradation_augmentation else {}
     )
     train_loader, val_loader = create_dataloaders(
         rgb_only=rgb_only, **loader_settings, **augmentation_settings,
@@ -375,6 +400,13 @@ def main(role: str, rgb_only: bool) -> None:
         'Max Samples': args.max_samples,
         'Teacher Checkpoint': str(args.teacher_checkpoint) if distilling else None,
         'Lambda Distill': args.lambda_distill if distilling else None,
+        'Training Augmentation': {
+            'enabled': args.degradation_augmentation,
+            'shares': dict(zip(('clean', 'dark', 'overexposed'), args.degradation_shares)),
+            'dark_strength_range': list(args.dark_strength_range),
+            'overexposed_strength_range': list(args.overexposed_strength_range),
+            'seed': args.augmentation_seed,
+        },
     }
     if args.max_samples is not None:
         config['Training Sequences'] = sequence_names(train_loader.dataset)

@@ -1,5 +1,6 @@
 import argparse
 import math
+from numbers import Integral
 from functools import lru_cache
 from pathlib import Path
 import hashlib
@@ -8,7 +9,7 @@ import h5py
 import hdf5plugin  # Required to prevent Blosc decompression error
 import numpy as np
 import torch
-from torch.utils.data import Dataset, DataLoader, Subset
+from torch.utils.data import Dataset, DataLoader, Subset, get_worker_info
 from dsec_det.dataset import DSECDet
 from dsec_det.label import CLASSES, COLORS
 from dsec_det.io import extract_from_h5_by_timewindow, yaml_file_to_dict
@@ -31,6 +32,14 @@ EVENT_WINDOW_US = 50_000
 EVENT_SCALE_K = 44.0
 
 DEFAULT_DEGRADATION_SHARES = (0.5, 0.25, 0.25)
+DEFAULT_STRENGTH_RANGE = (STRENGTH_LEVELS["mild"], STRENGTH_LEVELS["strong"])
+DEFAULT_AUGMENTATION_SEED = 0
+
+
+def validate_augmentation_seed(seed):
+    if isinstance(seed, bool) or not isinstance(seed, Integral) or seed < 0:
+        raise ValueError("augmentation seed must be a non-negative integer")
+    return int(seed)
 
 
 def validate_degradation_shares(shares):
@@ -42,13 +51,29 @@ def validate_degradation_shares(shares):
     return shares
 
 
-def augment_rgb_degradation(image, shares):
-    """Independently sample a condition on each access, at fixed strong strength."""
-    condition = np.random.choice(("clean", "dark", "overexposed"), p=shares)
+def validate_strength_range(strength_range):
+    """Validate an inclusive minimum/maximum on the benchmark's [0, 1] scale."""
+    values = tuple(float(value) for value in strength_range)
+    if (len(values) != 2 or any(not math.isfinite(value) for value in values)
+            or not 0 <= values[0] <= values[1] <= 1):
+        raise ValueError("strength range must be two finite values with 0 <= min <= max <= 1")
+    return values
+
+
+def augment_rgb_degradation(
+    image, shares,
+    dark_strength_range=DEFAULT_STRENGTH_RANGE,
+    overexposed_strength_range=DEFAULT_STRENGTH_RANGE,
+    *, rng: np.random.Generator,
+):
+    """Sample a fresh condition and uniform degradation strength on each access."""
+    condition = rng.choice(("clean", "dark", "overexposed"), p=shares)
     if condition == "dark":
-        return apply_dark_degradation(image, strength=1.0, rng=np.random)
+        strength = rng.uniform(*dark_strength_range)
+        return apply_dark_degradation(image, strength=strength, rng=rng)
     if condition == "overexposed":
-        return overexpose(image, 1.0)
+        strength = rng.uniform(*overexposed_strength_range)
+        return overexpose(image, strength)
     return image
 
 
@@ -156,7 +181,15 @@ class DSECFusionDataset(Dataset):
         degradation_strength=1.0,
         evaluation_seed=0,
         augmentation_shares=None,
+        dark_strength_range=DEFAULT_STRENGTH_RANGE,
+        overexposed_strength_range=DEFAULT_STRENGTH_RANGE,
+        augmentation_seed=DEFAULT_AUGMENTATION_SEED,
     ):
+        self.augmentation_seed = validate_augmentation_seed(augmentation_seed)
+        self._augmentation_rng = None
+        self._augmentation_worker_id = None
+        self.dark_strength_range = validate_strength_range(dark_strength_range)
+        self.overexposed_strength_range = validate_strength_range(overexposed_strength_range)
         self.augmentation_shares = None
         if augmentation_shares is not None:
             if split != "train" or not rgb_only or degradation != "clean":
@@ -179,6 +212,21 @@ class DSECFusionDataset(Dataset):
 
     def __len__(self):
         return len(self.base_dataset)
+
+    def augmentation_rng(self):
+        """Own stream per worker; never use evaluation or global RNG state.
+
+        Initialise lazily so workers do not inherit identical generator states.
+        Persistent workers keep advancing their streams across epochs.
+        """
+        worker = get_worker_info()
+        worker_id = worker.id if worker is not None else -1
+        if self._augmentation_rng is None or self._augmentation_worker_id != worker_id:
+            self._augmentation_rng = np.random.default_rng(
+                np.random.SeedSequence(self.augmentation_seed, spawn_key=(worker_id + 1,))
+            )
+            self._augmentation_worker_id = worker_id
+        return self._augmentation_rng
 
     def generate_event_histogram(self, events, height=480, width=640):
         hist = np.zeros((2, height, width), dtype=np.float32)
@@ -210,7 +258,11 @@ class DSECFusionDataset(Dataset):
         image = cv2.cvtColor(sample["image"], cv2.COLOR_BGR2RGB)
 
         if self.augmentation_shares is not None:
-            image = augment_rgb_degradation(image, self.augmentation_shares)
+            image = augment_rgb_degradation(
+                image, self.augmentation_shares,
+                self.dark_strength_range, self.overexposed_strength_range,
+                rng=self.augmentation_rng(),
+            )
         elif self.degradation == "dark":
             # Only darkening is random, so only it needs a per-frame seed.
             # The darkening module will replace apply_dark_degradation here.
@@ -328,18 +380,29 @@ def create_dataloaders(
     degradation_strength: float = 1.0,
     evaluation_seed: int = 0,
     augmentation_shares: tuple[float, float, float] | None = None,
+    dark_strength_range: tuple[float, float] = DEFAULT_STRENGTH_RANGE,
+    overexposed_strength_range: tuple[float, float] = DEFAULT_STRENGTH_RANGE,
+    augmentation_seed: int = DEFAULT_AUGMENTATION_SEED,
 ) -> tuple[DataLoader, DataLoader]:
     """Create reproducible training and validation Dataloaders using explicit sequence splits.
 
     `rgb_only=True` yields 3-channel RGB images (student); `rgb_only=False` adds the
     2 event-histogram channels (teacher).
+    Augmentation shares and strength ranges apply only to training. Validation is
+    clean unless `degradation` explicitly requests an evaluation condition; its
+    strength and seed are independent of the training augmentation settings.
     """
     _check_loader_settings(logger, batch_size, num_workers)
 
     train_dataset = limit_dataset(
         DSECFusionDataset(
             dataset_path=dataset_path, split="train", rgb_only=rgb_only,
-            **({"augmentation_shares": augmentation_shares} if augmentation_shares is not None else {}),
+            **({
+                "augmentation_shares": augmentation_shares,
+                "dark_strength_range": dark_strength_range,
+                "overexposed_strength_range": overexposed_strength_range,
+                "augmentation_seed": augmentation_seed,
+            } if augmentation_shares is not None else {}),
         ),
         max_samples,
     )
@@ -390,6 +453,10 @@ def create_test_loader(
     degradation_strength: float = 1.0,
     evaluation_seed: int = 0,
 ) -> DataLoader:
+    """Load clean test images unless an evaluation degradation is explicitly requested.
+
+    Training augmentation settings are deliberately not accepted by this loader.
+    """
     _check_loader_settings(logger, batch_size, num_workers)
 
     test_dataset = DSECFusionDataset(

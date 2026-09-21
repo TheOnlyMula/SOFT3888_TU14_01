@@ -209,17 +209,39 @@ python train_rgb_student.py \
   --dataset-path "/path/to/DSEC_ROOT" \
   --epochs 10 \
   --degradation-augmentation \
-  --degradation-shares 0.5 0.25 0.25
+  --degradation-shares 0.5 0.25 0.25 \
+  --dark-strength-range 0.35 1.0 \
+  --overexposed-strength-range 0.35 1.0 \
+  --augmentation-seed 42
 ```
 
 Augmentation is off by default. Shares are probabilities in clean, darkened,
 over-exposed order; they must be non-negative and sum to 1. The default is
 50%/25%/25%. Each training image independently draws a fresh condition on every
-load, so batch and epoch proportions fluctuate. Validation and test loaders keep
-their existing behavior. This initial implementation uses fixed strength 1.0
-and the existing temporary darkening function; random strength ranges and a
-dedicated augmentation seed are not implemented yet. This option is for the
-RGB-only student without a teacher checkpoint.
+load, so batch and epoch proportions fluctuate. Augmentation affects only the
+training loader: validation (including checkpoint selection) and final test
+evaluation use clean RGB images, identical to those used without augmentation.
+To evaluate degraded images, explicitly run the [degraded evaluation benchmark](#degraded-evaluation-benchmark).
+For each degraded image, strength is drawn uniformly
+from the selected condition's range. Both ranges default to the benchmark's
+`mild` (0.35) through `strong` (1.0) levels. Bounds must satisfy
+`0 <= MIN <= MAX <= 1`; equal bounds give a fixed strength. Clean images do not
+draw a strength. Darkening still uses the existing temporary darkening function.
+These options are for the RGB-only student without a teacher checkpoint and do
+not change benchmark settings.
+
+`--augmentation-seed` (default `0`, non-negative integer) controls a dedicated
+random stream for condition selection, strength and darkening noise. It is
+independent of the benchmark's `--evaluation-seed` and global NumPy/PyTorch RNGs.
+Each loader worker has its own stream, which advances across epochs. The same
+seed reproduces the augmentation sequence for the same sample order, batch size
+and worker count; this seed does not control training shuffle or model randomness.
+Changing the worker count can change the augmentation sequence. Augmentation RNG
+state is not checkpointed, so restarting a loader restarts its streams.
+
+Every run's `runs/student/exp_XXX/config.yaml` records `Training Augmentation`:
+the enabled flag, named condition shares, both strength ranges and the seed,
+including default values when options are omitted.
 
 ### Teacher RGB + event training
 
