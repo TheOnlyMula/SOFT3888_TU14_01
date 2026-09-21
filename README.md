@@ -11,6 +11,8 @@ SOFT3888_TU14_01/
 ├── README.md
 ├── dataset_loader.py
 ├── training.py
+├── distillation.py
+├── train_distilled_student.py
 ├── train_rgb_student.py
 ├── train_teacher.py
 ├── evaluate.py
@@ -56,6 +58,16 @@ The shared training pipeline used by both models. It:
 - logs training metrics,
 - saves the best validation checkpoint,
 - optionally runs a final test evaluation.
+
+### train_distilled_student.py
+
+Trains the RGB student with unweighted feature distillation from a frozen RGB + event teacher (`distillation.py`). Training batches carry RGB + event channels: the teacher sees all of them, the student only the RGB ones. Validation and test stay RGB-only, so student results never depend on event data.
+
+```bash
+python train_distilled_student.py   --dataset-path dataset   --epochs 50   --teacher-checkpoint runs/teacher/exp_xxx/best_teacher_yolo.pt   --lambda-distill 1.0
+```
+
+The distillation loss is the mean smooth L1 distance between the student's and the frozen teacher's one-to-one neck features, applied at every spatial location (no object mask and no event-quality weight yet). Each epoch logs `distill_loss` and its weighted contribution to the total loss.
 
 ### train_rgb_student.py and train_teacher.py
 
@@ -264,6 +276,16 @@ The benchmark reports mAP@0.5, mAP@0.5:0.95, recall, and the performance drop fr
 The evaluation seed keeps benchmark inputs reproducible. Each condition also produces an RGB fingerprint, which can be compared between runs to confirm that the same input images were evaluated.
 
 For fair comparisons between models, use the same dataset split, degradation settings, evaluation seed, and benchmark configuration.
+
+### Event representation
+
+The teacher's event channels are a 2-channel positive/negative histogram over the causal window, log-scaled and normalised into [0, 1]:
+
+```
+channel = min( log1p(count) / log1p(EVENT_SCALE_K), 1 )
+```
+
+`EVENT_SCALE_K = 44` is the 99.9th percentile of non-zero per-pixel event counts, measured on the training split only with `tools/measure_event_scale.py`. Log scaling keeps low counts distinguishable, since a typical active pixel sees only ~2 events, and the divisor puts the event channels on the same [0, 1] scale as RGB. The constant is frozen: teacher and distillation runs must use the same value, and changing it requires retraining the teacher.
 
 ## Dataset and training notes
 
