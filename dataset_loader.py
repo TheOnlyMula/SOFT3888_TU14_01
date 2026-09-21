@@ -1,4 +1,5 @@
 import argparse
+import math
 from functools import lru_cache
 from pathlib import Path
 import hashlib
@@ -24,6 +25,10 @@ SPLIT_CONFIG_PATH = (
 )
 
 EVENT_WINDOW_US = 50_000
+
+# Divisor that puts the log-scaled event histogram in [0, 1], like the RGB channels.
+# It is the 99.9th percentile of non-zero per-pixel event counts, measured by tools/measure_event_scale.py
+EVENT_SCALE_K = 44.0
 
 
 def degradation_seed(
@@ -160,10 +165,10 @@ class DSECFusionDataset(Dataset):
             np.add.at(hist[0], (y[p == 0], x[p == 0]), 1)
             np.add.at(hist[1], (y[p == 1], x[p == 1]), 1)
 
-        hist_tensor = torch.from_numpy(hist)
-        # Apply Log Scaling normalization
-        hist_tensor = torch.log1p(hist_tensor)
-        return hist_tensor
+        # Log scaling compresses the heavy tail (a typical active pixel sees ~2 events,
+        # the busiest hundreds), then the fixed divisor bounds the channels to [0, 1].
+        hist_tensor = torch.log1p(torch.from_numpy(hist)) / math.log1p(EVENT_SCALE_K)
+        return hist_tensor.clamp_(max=1.0)
 
     def __getitem__(self, idx):
         # RGB-only training/testing must not open event files.

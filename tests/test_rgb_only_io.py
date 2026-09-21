@@ -6,7 +6,7 @@ from unittest.mock import patch
 import numpy as np
 import torch
 
-from dataset_loader import DSECFusionDataset, load_causal_events
+from dataset_loader import EVENT_SCALE_K, DSECFusionDataset, load_causal_events
 
 
 class RgbOnlyIoTests(unittest.TestCase):
@@ -72,9 +72,29 @@ class RgbOnlyIoTests(unittest.TestCase):
         histogram = fused[3:]
         self.assertEqual(tuple(fused[:3].shape), (3, 16, 16))
         self.assertEqual(tuple(histogram.shape), (2, 16, 16))
-        self.assertAlmostEqual(histogram[1, 4, 3].item(), math.log1p(1.0), places=6)
+        self.assertAlmostEqual(
+            histogram[1, 4, 3].item(), math.log1p(1.0) / math.log1p(EVENT_SCALE_K), places=6
+        )
         self.assertEqual(int((histogram > 0).sum()), 1)
         self.assertEqual(targets.numel(), 0)
+
+    @patch("dataset_loader.DSECDet")
+    def test_event_channels_are_scaled_into_the_unit_range(self, dataset_class):
+        dataset = DSECFusionDataset(Path("fake"), rgb_only=False)
+        events = {
+            "x": np.array([0, 1, 1] + [2] * 500),
+            "y": np.array([0, 0, 0] + [0] * 500),
+            "p": np.array([1, 1, 1] + [1] * 500),
+        }
+
+        histogram = dataset.generate_event_histogram(events, height=4, width=4)
+
+        # One event is well above zero, and a pixel far past K is clipped at 1.0.
+        self.assertAlmostEqual(histogram[1, 0, 0].item(), math.log1p(1.0) / math.log1p(EVENT_SCALE_K), places=6)
+        self.assertAlmostEqual(histogram[1, 0, 1].item(), math.log1p(2.0) / math.log1p(EVENT_SCALE_K), places=6)
+        self.assertEqual(histogram[1, 0, 2].item(), 1.0)
+        self.assertGreaterEqual(histogram.min().item(), 0.0)
+        self.assertLessEqual(histogram.max().item(), 1.0)
 
     @patch("dataset_loader.event_time_offset_us", return_value=1_020_000)
     @patch("dataset_loader.extract_from_h5_by_timewindow")

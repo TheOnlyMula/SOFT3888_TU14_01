@@ -8,6 +8,7 @@
 runs/
 *.log
 project_b_capstone_milestones.md
+*.pdf
 tools/results
 # Dataset
 DSEC*/
@@ -17,7 +18,7 @@ data*/
 *.hdf5
 *.npy
 results
-
+docs*/
 # Python
 __pycache__/
 *.py[cod]

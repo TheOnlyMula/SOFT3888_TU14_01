@@ -1,6 +1,6 @@
 """Train the RGB-only student: YOLO26n on 3-channel RGB images.
 
-Usage: python train_rgb_student.py --dataset-path dataset --epochs 50
+Usage: python train_rgb_student.py --dataset-path DATASET PATH --epochs 50
 """
 from training import main
 
