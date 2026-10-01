@@ -9,7 +9,6 @@ import json
 from pathlib import Path
 import platform
 import sys
-import kornia
 
 import cv2
 import numpy as np
