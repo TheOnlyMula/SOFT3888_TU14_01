@@ -376,7 +376,16 @@ python tools/generate_overexposure_examples.py --image "/path/to/rgb.png" --outp
 - `strength`: the intensity of darkening; can be a predefined named level (`minimal`, `mild`, `medium`, `strong`) or a constant between 0 and 1
 - `seed`: an optional integer to determine noise generation & illumination mapping; 0 by default
 
-and returs a dictionary containing the following: returns a new, same-shape `uint8` RGB array without randomness or input mutation
+The method returns a dictionary containing the following: 
+```python
+{
+  'image': ..., # A new, same-shape `uint8` darkened RGB array with added noise
+  'seed': ..., # Seed used to generate the illumination map & noise
+  'global_illum_factor': ..., # Global illumination factor sampled from a designated range (see below)
+  'mean_brightness': ..., # Mean brightness of the resultant image
+  'proportion_dark': ..., # Proportion of discernably dark pixels in the resultant image
+}
+```
 
 BGR-to-RGB conversion is performed on `image` before applying tensor normalization or event concatenation.
 
@@ -399,8 +408,8 @@ custom_rgb = darken(rgb, 0.6)  # Continuous strength in [0, 1].
 A custom strength level `i` will generate a global illumination factor range of [`i` - 0.1, `i` + 0.1], bounded by 0 and 1. Note that `i` = 0 will generate a pitch-black image, and `i` = 1 will result in no transformation to the image.
 
 [Day examples](docs/darkening/day_000003.png) and
-[night examples](docs/darkening/night_000500.png) show result, illumination factor, mean brightness, and percentage of discernably dark pixels for each strength level.
-See the [detailed guide](docs/darkening/README.md) for the formula and measured results.
+[night examples](docs/darkening/night_000005.png) show result, illumination factor, mean brightness, and percentage of discernably dark pixels for each strength level for `interlaken_00_c/000003.png` and `zurich_city_09_a/000005.png` respectively.
+See the [detailed guide](docs/darkening/README.md) for more information.
 
 Generate examples and descriptive measurements into a new output directory:
 

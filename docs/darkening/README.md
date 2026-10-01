@@ -2,9 +2,15 @@
 
 [Back to the project README](../../README.md)
 
-`darkening.py` provides `darken(image, strength, seed = 0)` for a non-empty `H x W x 3` NumPy RGB array with dtype `uint8`. The seed shall be 0 if not manually provided. It returns a dictionary containg the resultant NumPy array alongside seed, illumination factor, and raw mean brightness:
+`darkening.py` provides `darken(image, strength, seed = 0)` for a non-empty `H x W x 3` NumPy RGB array with dtype `uint8`. The seed shall be 0 if not manually provided. It returns a dictionary containg the following:
 ```python
-{'image': np.ndarray, 'seed': int, 'mean_brightness': float}
+{
+  'image': ..., # A new, same-shape `uint8` darkened RGB array with added noise
+  'seed': ..., # Seed used to generate the illumination map & noise
+  'global_illum_factor': ..., # Global illumination factor sampled from a designated range (see below)
+  'mean_brightness': ..., # Mean brightness of the resultant image
+  'proportion_dark': ..., # Proportion of discernably dark pixels in the resultant image
+}
 ```
 OpenCV BGR-to-RGB conversion is performed on `image` before applying tensor normalization or event concatenation. This standalone function does not change the existing training/evaluation pipeline or touch labels.
 
