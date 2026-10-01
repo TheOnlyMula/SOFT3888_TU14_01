@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import platform
 import sys
+import kornia
 
 import cv2
 import numpy as np
@@ -44,32 +45,34 @@ def main():
         raise ValueError("Input must be an 8-bit image with three colour channels")
     rgb_input = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
-    variants = {"clean":
-                {'image': rgb_input, 'global_illum_factor': 1, 'max_brightness': 1}}
-    for level in darkening.STRENGTH_RANGES:
+    strengths = {1: 1} | darkening.STRENGTH_RANGES
+    variants = {}
+    for level in strengths:
         variants[level] = darkening.darken(rgb_input, level, seed = args.seed)
 
     args.output_dir.mkdir(parents=True, exist_ok=False)
-
     panels = []
-    for level in variants.keys():
-        results_dict = variants[level]
-        image = results_dict['image']
-        illum_factor = results_dict['global_illum_factor']
-        max_brightness = results_dict['max_brightness']
+    stats = {}
 
-        save_rgb(args.output_dir / f"{level}.png", image)
+    for level in variants.keys():
+        lv = 'clean' if level == 1 else level
+        results_dict = dict(list(variants[level].items())[1:])
+        image = variants[level]['image']
+        illum_factor = results_dict['global_illum_factor']
+        mean_brightness = results_dict['mean_brightness']
+        prop_dark = results_dict['proportion_dark']
+
+        stats[lv] = results_dict
+
+        save_rgb(args.output_dir / f"{lv}.png", image)
         header = np.full((64, image.shape[1], 3), 28, dtype=np.uint8)
 
-        if level == 'clean':
-            cv2.putText(header, level.upper(), (12, 24), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.65, (255, 255, 255), 1, cv2.LINE_AA)
-        else:
-            cv2.putText(header, f'{level.upper()} [{darkening.STRENGTH_RANGES[level][0]}, {darkening.STRENGTH_RANGES[level][1]})', (12, 24), cv2.FONT_HERSHEY_SIMPLEX,
-                                0.65, (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.putText(header, lv.upper(), (12, 24), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.65, (255, 255, 255), 1, cv2.LINE_AA)
 
-        caption = (f"Global illumination factor: {illum_factor:.4f} | "
-                   f"Peak brightness: {max_brightness:.4f}")
+        caption = (f"Illumination factor: {illum_factor*100:.2f}% | "
+                   f"Mean brightness: {mean_brightness*100:.2f}% | "
+                   f"Dark pixels: {prop_dark*100:.2f}%")
         cv2.putText(header, caption, (12, 48), cv2.FONT_HERSHEY_SIMPLEX,
                     0.43, (230, 230, 230), 1, cv2.LINE_AA)
         panels.append(np.vstack((header, image)))
@@ -85,6 +88,7 @@ def main():
         "strength_levels": darkening.STRENGTH_RANGES,
         "fully_darkened_definition": "All three RGB channels equal 0; denominator is every pixel",
         "runtime": {"python": platform.python_version(), "numpy": np.__version__, "opencv": cv2.__version__},
+        "stats": stats
     }
     (args.output_dir / "metrics.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(f"Saved example images and measurements to: {args.output_dir}")
