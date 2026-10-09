@@ -15,7 +15,7 @@ from dataset_loader import (
     rgb_loader_fingerprint,
 )
 from overexposure import STRENGTH_LEVELS
-from utils import extract_trainable_model
+from utils import extract_trainable_model, select_device
 
 
 def _prepare_yolo_batch(imgs, targets, device):
@@ -437,7 +437,7 @@ if __name__ == "__main__":
     log_directory = log.create_log_directory(args.type)
     logger = log.create_logger("evaluate", log_directory)
     log.log_command(sys.argv, log_directory)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = select_device()
 
     rgb_only = args.type == "student"
     model = extract_trainable_model(

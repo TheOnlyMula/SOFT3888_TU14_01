@@ -44,9 +44,20 @@ This file defines the DSEC dataset access layer. It creates a custom dataset tha
 - optionally reads event tensors from event files,
 - converts event polarity information into a 2-channel histogram,
 - maps labels into YOLO-style bounding box targets,
-- supports both RGB-only and fused RGB + event training paths.
+- supports both RGB-only and fused RGB + event training paths,
+- augments the training split when `augment=True` (see below).
 
 Images and labels come from the DSEC detector utilities. For real-time detection, each RGB image is paired only with events from the 50 ms _before_ its timestamp (`load_causal_events` in `dataset_loader.py`), so the model never sees events that happen after the image. DSECDet's own `sync` windows are not used for events: `sync="back"` returns the 50 ms after the image, and `sync="front"` pairs the image with the previous frame's labels. The first frame of each sequence has no preceding events, so its event channels are empty.
+
+### augment.py
+
+Training-time augmentation, used by every model so student comparisons stay matched. One random draw moves the RGB pixels, the event pixels and the boxes together, so events stay aligned with the RGB the student sees:
+
+- horizontal flip (probability 0.5),
+- zoom of 0.5-1.5x about the centre and a shift of up to 10% of the width and height,
+- hue shift and saturation jitter on the RGB channels only (hue moves by the same amount for every colour, as in Ultralytics 8.4). Brightness is left alone because brightness shifts belong to the degradation-augmentation baseline.
+
+Pixels uncovered by the zoom or shift are grey (114) in RGB and 0 in the event channels, since any other event value would invent events. Boxes that end up mostly outside the image, or cut into slivers more than 100 times longer than wide, are dropped. Every sample makes the same random draws with or without events, so for the same `--seed` the RGB student and the distilled student see identical augmented RGB.
 
 ### training.py
 
@@ -54,7 +65,10 @@ The shared training pipeline used by both models. It:
 
 - builds a DSEC RGB dataloader for train/validation splits,
 - initialises a YOLO model from the pretrained `yolo26n.pt` checkpoint,
-- trains with a YOLO-style loss,
+- trains with a YOLO-style loss on augmented frames (`--no-augment` turns this off),
+- accumulates gradients to about 64 images per optimiser step, as Ultralytics does,
+- follows Ultralytics' YOLO26 optimisation recipe: MuSGD (lr 0.01, Nesterov momentum, 3x learning rate on the detection head's classification layers, weight decay on conv and linear weights only), the summed rather than averaged loss, a 3-epoch warmup of learning rate, momentum and accumulation, then a linear decay to 1%,
+- runs with deterministic GPU kernels (as Ultralytics does), which costs some speed,
 - logs training metrics,
 - saves the best validation checkpoint,
 - optionally runs a final test evaluation.
@@ -76,7 +90,7 @@ Thin entry points into `training.py`. The two models are trained identically; th
 - `train_rgb_student.py`: 3 channels (RGB).
 - `train_teacher.py`: 5 channels (RGB + 2-channel event histogram).
 
-Both accept the same arguments (`--dataset-path`, `--epochs`, `--batch-size`, `--num-workers`, `--max-samples`, `--skip-test`, `--console-level`).
+Both accept the same arguments (`--dataset-path`, `--epochs`, `--batch-size`, `--num-workers`, `--max-samples`, `--skip-test`, `--seed`, `--no-augment`, `--resume`, `--console-level`). Use the same `--seed` for every student you compare; it fixes model initialisation, the shuffle order and the augmentation draws.
 
 ### evaluate.py
 
@@ -195,11 +209,12 @@ python train_rgb_student.py \
 The script does the following:
 
 - loads the DSEC RGB-only train and validation sets,
-- shuffles the training data,
+- shuffles the training data with a seeded generator (`--seed`, default 0),
+- augments each training frame (flip, scale, shift, hue/saturation) unless `--no-augment` is given,
 - collates labels into a YOLO-compatible target structure,
-- clips gradients to avoid exploding updates,
+- accumulates gradients to about 64 images per step and clips them to avoid exploding updates,
 - validates after each epoch,
-- saves the model with the lowest validation loss,
+- saves the model with the highest validation mAP50-95,
 - runs a final test evaluation unless `--skip-test` is provided.
 
 Enable a random degradation mix for RGB-only student training:
@@ -270,7 +285,7 @@ During training, validation is performed using a model in evaluation mode and `t
 - average validation classification loss,
 - average validation L1 loss.
 
-The best checkpoint is selected using the lowest validation batch loss.
+The best checkpoint is selected using the highest validation mAP50-95. Validation loss is not used, because the YOLO26 loss shifts its weighting between the two detection heads every epoch, so loss values are not comparable across epochs.
 
 ### Test evaluation command
 
@@ -334,7 +349,7 @@ channel = min( log1p(count) / log1p(EVENT_SCALE_K), 1 )
 - Training and validation are both performed on labelled subsets, while test evaluation is reserved for final measurement.
 - The code expects a valid DSEC root path with all required subdirectories aligned to the same sequence ID.
 - On Windows, prefer ASCII-only dataset paths when possible because OpenCV and some file-handling utilities can sometimes fail on non-ASCII characters.
-- The training pipeline saves both a best checkpoint and a latest checkpoint, so progress can resume if a run is interrupted.
+- The training pipeline saves both a best checkpoint and a latest checkpoint after every epoch. To continue an interrupted run in the same folder, pass only its folder: `python train_rgb_student.py --resume runs/student/exp_006`. The settings come from the original run (`run_args.yaml`, or `run_command.txt` for older runs); only `--num-workers` and `--console-level` may be given again. Model, optimiser, EMA and schedules continue exactly, but the shuffle order and augmentation draws after the resume point differ from an uninterrupted run.
 
 ## Testing and validation
 

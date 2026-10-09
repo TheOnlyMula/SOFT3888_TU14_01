@@ -11,13 +11,32 @@ from dataset_loader import limit_dataset, yolo_collate_fn
 from utils import DSEC_NAMES, build_model, set_loss_schedule
 from dataset_loader import create_rgb_dataloaders
 from evaluate import validate_model
+from ultralytics.optim import MuSGD
 from utils import (
+    OPTIMISER_LR,
     create_optimiser,
     extract_trainable_model,
     fetch_best_dict,
     load_checkpoint,
     select_device,
 )
+
+
+def param_ids(group):
+    return {id(p) for p in group["params"]}
+
+
+def non_empty(optimiser):
+    # Like Ultralytics, every group is split into a 3x and a 1x half, even when one is empty
+    return [g for g in optimiser.param_groups if g["params"]]
+
+
+def group_named(optimiser, name):
+    """The non-boosted optimiser group with this Ultralytics `param_group` name."""
+    return next(
+        g for g in optimiser.param_groups
+        if g["param_group"] == name and g["lr"] == OPTIMISER_LR
+    )
 
 
 class TrainRgbStudentTests(unittest.TestCase):
@@ -56,7 +75,12 @@ class TrainRgbStudentTests(unittest.TestCase):
         self.assertEqual(
             dataset_class.call_args_list,
             [
-                call(dataset_path=Path("fake-dataset"), split="train", rgb_only=True),
+                call(
+                    dataset_path=Path("fake-dataset"),
+                    split="train",
+                    rgb_only=True,
+                    augment=False,
+                ),
                 call(
                     dataset_path=Path("fake-dataset"),
                     split="val",
@@ -124,9 +148,21 @@ class TrainRgbStudentTests(unittest.TestCase):
         model[0].requires_grad_(False)
         optimiser = create_optimiser(model)
 
-        self.assertIsInstance(optimiser, torch.optim.AdamW)
-        self.assertEqual(optimiser.param_groups[0]["lr"], 1e-4)
-        self.assertEqual(optimiser.param_groups[0]["weight_decay"], 0.0005)
+        self.assertIsInstance(optimiser, MuSGD)
+        for group in non_empty(optimiser):
+            self.assertEqual(group["lr"], OPTIMISER_LR)  # no detection head, so nothing boosted
+            self.assertEqual(group["momentum"], 0.9)
+            self.assertTrue(group["nesterov"])
+
+        # Matrices get the Muon update with weight decay; biases plain SGD without decay
+        muon = group_named(optimiser, "muon")
+        bias = group_named(optimiser, "bias")
+        self.assertEqual(param_ids(muon), {id(model[1].weight)})
+        self.assertTrue(muon["use_muon"])
+        self.assertEqual(muon["weight_decay"], 0.0005)
+        self.assertEqual(param_ids(bias), {id(model[1].bias)})
+        self.assertFalse(bias["use_muon"])
+        self.assertEqual(bias["weight_decay"], 0.0)
 
         optimised = {
             id(parameter)
@@ -143,6 +179,30 @@ class TrainRgbStudentTests(unittest.TestCase):
         }
         self.assertEqual(optimised, unfrozen)
         self.assertTrue(optimised.isdisjoint(frozen))
+
+    def test_normalisation_weights_get_no_weight_decay(self):
+        model = torch.nn.Sequential(torch.nn.Conv2d(3, 4, 3, bias=False), torch.nn.BatchNorm2d(4))
+        optimiser = create_optimiser(model)
+        self.assertEqual(param_ids(group_named(optimiser, "muon")), {id(model[0].weight)})
+        norm = group_named(optimiser, "bn")
+        self.assertEqual(param_ids(norm), {id(model[1].weight)})
+        self.assertEqual(norm["weight_decay"], 0.0)
+        self.assertEqual(param_ids(group_named(optimiser, "bias")), {id(model[1].bias)})
+
+    def test_yolo26_classification_head_trains_at_three_times_the_rate(self):
+        model = build_model(ch=3)
+        optimiser = create_optimiser(model, batch_size=6)
+        head = model.model[-1]
+        boosted = {id(p) for layer in (head.cv3, head.one2one_cv3) for p in layer.parameters()}
+        for group in non_empty(optimiser):
+            expected_lr = 3 * OPTIMISER_LR if param_ids(group) & boosted else OPTIMISER_LR
+            self.assertEqual(group["lr"], expected_lr)
+        self.assertEqual(
+            set().union(*(param_ids(g) for g in optimiser.param_groups if g["lr"] > OPTIMISER_LR)),
+            boosted,
+        )
+        # Weight decay scales with the images per step: 6 images x 11 batches against 64
+        self.assertAlmostEqual(group_named(optimiser, "muon")["weight_decay"], 0.0005 * 66 / 64)
 
     def test_checkpoint_loads_epoch_model_and_optimiser(self):
         original_model = torch.nn.Linear(10, 2)
@@ -197,6 +257,7 @@ class TrainRgbStudentTests(unittest.TestCase):
                     "optimiser_state_dict": original_optimiser.state_dict(),
                     "epoch": 3,
                     "val_loss": 0.25,
+                    "val_metrics": {"map50_95": 0.4},
                 },
                 path,
             )
@@ -210,7 +271,7 @@ class TrainRgbStudentTests(unittest.TestCase):
                 mode=1,
             )
 
-        self.assertEqual(result, {"best_epoch": 3, "best_val_loss": 0.25})
+        self.assertEqual(result, {"best_epoch": 3, "best_map50_95": 0.4})
         for original, restored in zip(original_model.parameters(), model.parameters()):
             self.assertTrue(torch.equal(original, restored))
 

@@ -5,10 +5,17 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
-from distillation import DISTILL_LEVEL, feature_distillation_loss, head_outputs, load_teacher
+from distillation import (
+    DISTILL_LEVEL,
+    DISTILL_TARGET,
+    feature_distillation_loss,
+    head_outputs,
+    load_teacher,
+)
+from utils import build_model
 
 
-def predictions(values, key="one2one"):
+def predictions(values, key=DISTILL_TARGET):
     return {key: {"feats": [torch.full((1, 2, 4, 4), value) for value in values]}}
 
 
@@ -37,14 +44,32 @@ class FeatureDistillationLossTests(unittest.TestCase):
 
     def test_no_gradient_flows_into_the_teacher(self):
         student = predictions([0.0])
-        student["one2one"]["feats"][0].requires_grad_(True)
+        student[DISTILL_TARGET]["feats"][0].requires_grad_(True)
         teacher_feature = torch.full((1, 2, 4, 4), 1.0, requires_grad=True)
-        teacher = {"one2one": {"feats": [teacher_feature]}}
+        teacher = {DISTILL_TARGET: {"feats": [teacher_feature]}}
 
         feature_distillation_loss(student, teacher).backward()
 
-        self.assertIsNotNone(student["one2one"]["feats"][0].grad)
+        self.assertIsNotNone(student[DISTILL_TARGET]["feats"][0].grad)
         self.assertIsNone(teacher_feature.grad)
+
+    def test_distillation_gradient_reaches_the_real_student(self):
+        # The YOLO26 head detaches the one2one features in training mode, so a hand-built
+        # prediction dict cannot show whether the loss actually trains the student.
+        student = build_model(3).train()
+        teacher = build_model(5).eval().requires_grad_(False)
+        images = torch.rand(1, 5, 64, 64)
+
+        student_preds = student(images[:, :3])
+        with torch.no_grad():
+            teacher_preds = teacher(images)
+        loss = feature_distillation_loss(student_preds, teacher_preds)
+
+        self.assertTrue(loss.requires_grad)
+        loss.backward()
+        stem_grad = student.model[0].conv.weight.grad
+        self.assertIsNotNone(stem_grad)
+        self.assertGreater(stem_grad.abs().sum().item(), 0.0)
 
 
 class LoadTeacherTests(unittest.TestCase):

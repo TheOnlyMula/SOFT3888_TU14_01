@@ -11,7 +11,7 @@ from dsec_det.dataset import DSECDet
 from dsec_det.visualize import render_object_detections_on_image 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from utils import build_model
+from utils import build_model, select_device
 from dataset_loader import load_causal_events
 
 def create_video_writer(output_path, fps, width, height):
@@ -66,7 +66,7 @@ if __name__ == '__main__':
         
     script_dir = Path(__file__).resolve().parent
     
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = select_device()
 
     student_model = None
     if args.student_weights is not None:

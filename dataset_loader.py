@@ -14,6 +14,7 @@ from dsec_det.dataset import DSECDet
 from dsec_det.label import CLASSES, COLORS
 from dsec_det.io import extract_from_h5_by_timewindow, yaml_file_to_dict
 from overexposure import STRENGTH_LEVELS, overexpose
+from augment import augment_sample
 import logging
 from ultralytics import YOLO
 
@@ -27,8 +28,6 @@ SPLIT_CONFIG_PATH = (
 
 EVENT_WINDOW_US = 50_000
 
-# Divisor that puts the log-scaled event histogram in [0, 1], like the RGB channels.
-# It is the 99.9th percentile of non-zero per-pixel event counts, measured by tools/measure_event_scale.py
 EVENT_SCALE_K = 44.0
 
 DEFAULT_DEGRADATION_SHARES = (0.5, 0.25, 0.25)
@@ -184,6 +183,7 @@ class DSECFusionDataset(Dataset):
         dark_strength_range=DEFAULT_STRENGTH_RANGE,
         overexposed_strength_range=DEFAULT_STRENGTH_RANGE,
         augmentation_seed=DEFAULT_AUGMENTATION_SEED,
+        augment=False,
     ):
         self.augmentation_seed = validate_augmentation_seed(augmentation_seed)
         self._augmentation_rng = None
@@ -209,6 +209,8 @@ class DSECFusionDataset(Dataset):
         self.degradation = degradation
         self.degradation_strength = resolve_degradation_strength(degradation_strength)
         self.evaluation_seed = evaluation_seed
+        # Training-only flip, scale, shift and hue/saturation jitter (see augment.py)
+        self.augment = augment
 
     def __len__(self):
         return len(self.base_dataset)
@@ -283,31 +285,45 @@ class DSECFusionDataset(Dataset):
             image = overexpose(image, self.degradation_strength)
 
         h, w = image.shape[0], image.shape[1]
+
+        tracks = sample["tracks"]
+        classes = np.array([int(box["class_id"]) for box in tracks], dtype=np.int64)
+        boxes = np.array(
+            [[box["x"], box["y"], box["x"] + box["w"], box["y"] + box["h"]] for box in tracks],
+            dtype=np.float64,
+        ).reshape(-1, 4)
+
+        event_tensor = None
+        if not self.rgb_only:
+            event_tensor = self.generate_event_histogram(
+                sample.get("events"), height=h, width=w
+            )
+
+        if self.augment:
+            # One random draw moves RGB, events and boxes together
+            events = None if event_tensor is None else event_tensor.permute(1, 2, 0).numpy()
+            image, events, boxes, classes = augment_sample(image, events, boxes, classes)
+            if events is not None:
+                event_tensor = torch.from_numpy(events).permute(2, 0, 1)
+
         img_tensor = torch.from_numpy(image).permute(2, 0, 1).float() / 255.0
 
-        # YOLO Bounding Box Conversion
-        yolo_targets = []
-        for box in sample["tracks"]:
-            cls_id = int(box["class_id"])
-            box_x, box_y, box_w, box_h = box["x"], box["y"], box["w"], box["h"]
+        yolo_targets = [
+            [
+                int(cls_id),
+                (x1 + x2) / 2.0 / w,
+                (y1 + y2) / 2.0 / h,
+                (x2 - x1) / w,
+                (y2 - y1) / h,
+            ]
+            for cls_id, (x1, y1, x2, y2) in zip(classes, boxes)
+        ]
 
-            # Calculate center points and normalize
-            x_center = (box_x + box_w / 2.0) / w
-            y_center = (box_y + box_h / 2.0) / h
-            norm_w = box_w / w
-            norm_h = box_h / h
-
-            yolo_targets.append([cls_id, x_center, y_center, norm_w, norm_h])
-
-        # Convert to a PyTorch tensor
         target_tensor = torch.tensor(yolo_targets, dtype=torch.float32)
 
         if self.rgb_only:
             return img_tensor, target_tensor
         else:
-            event_tensor = self.generate_event_histogram(
-                sample.get("events"), height=h, width=w
-            )
             fused_tensor = torch.cat((img_tensor, event_tensor), dim=0)
             return fused_tensor, target_tensor
 
@@ -383,6 +399,8 @@ def create_dataloaders(
     dark_strength_range: tuple[float, float] = DEFAULT_STRENGTH_RANGE,
     overexposed_strength_range: tuple[float, float] = DEFAULT_STRENGTH_RANGE,
     augmentation_seed: int = DEFAULT_AUGMENTATION_SEED,
+    augment: bool = False,
+    seed: int | None = None,
 ) -> tuple[DataLoader, DataLoader]:
     """Create reproducible training and validation Dataloaders using explicit sequence splits.
 
@@ -391,12 +409,14 @@ def create_dataloaders(
     Augmentation shares and strength ranges apply only to training. Validation is
     clean unless `degradation` explicitly requests an evaluation condition; its
     strength and seed are independent of the training augmentation settings.
+    `augment` applies geometric and colour augmentation to the train split only. `seed`
+    fixes the shuffle order and the per-worker augmentation draws.
     """
     _check_loader_settings(logger, batch_size, num_workers)
 
     train_dataset = limit_dataset(
         DSECFusionDataset(
-            dataset_path=dataset_path, split="train", rgb_only=rgb_only,
+            dataset_path=dataset_path, split="train", rgb_only=rgb_only, augment=augment,
             **({
                 "augmentation_shares": augmentation_shares,
                 "dark_strength_range": dark_strength_range,
@@ -427,6 +447,7 @@ def create_dataloaders(
         pin_memory=True,
         persistent_workers=num_workers > 0,
         collate_fn=yolo_collate_fn,
+        generator=None if seed is None else torch.Generator().manual_seed(seed),
     )
 
     val_loader = DataLoader(

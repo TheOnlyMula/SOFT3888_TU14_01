@@ -25,15 +25,38 @@ from dataset_loader import (
 )
 from distillation import feature_distillation_loss, load_teacher
 from ultralytics.utils.torch_utils import ModelEMA
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import LambdaLR
 from utils import (
+    NOMINAL_BATCH_SIZE,
+    OPTIMISER_LR,
+    accumulation_steps,
     select_device,
+    seed_everything,
     extract_trainable_model,
     create_optimiser,
     load_checkpoint,
     fetch_best_dict,
     set_loss_schedule,
 )
+
+# Warmup and schedule follow Ultralytics' YOLO26 defaults ("optimizer=auto" picking MuSGD).
+# Over the warmup the learning rate rises from 0, momentum rises from WARMUP_MOMENTUM, and the
+# images per optimiser step rise from one batch to NOMINAL_BATCH_SIZE.
+WARMUP_EPOCHS = 3.0
+WARMUP_MOMENTUM = 0.8
+MOMENTUM_AFTER_WARMUP = 0.937
+FINAL_LR_FRACTION = 0.01
+
+
+def lr_factor(epoch: int, total_epochs: int) -> float:
+    """Fraction of the starting learning rate used in `epoch` (Ultralytics' linear schedule)."""
+    return max(1 - epoch / total_epochs, 0) * (1 - FINAL_LR_FRACTION) + FINAL_LR_FRACTION
+
+
+def interpolate(position: float, end: float, start_value: float, end_value: float) -> float:
+    """Linear ramp from `start_value` at 0 to `end_value` at `end`."""
+    return start_value + (end_value - start_value) * min(max(position / end, 0.0), 1.0)
+
 
 def format_duration(seconds: float) -> str:
     minutes, seconds = divmod(int(seconds), 60)
@@ -53,8 +76,19 @@ def train_model(
     latest_path: Path,
     teacher: torch.nn.Module | None = None,
     lambda_distill: float = 0.0,
+    nominal_batch_size: int = NOMINAL_BATCH_SIZE,
+    warmup_epochs: float = WARMUP_EPOCHS,
 ) -> Path:
-    """Train a detector and save the weights with the lowest validation loss.
+    """Train a detector and save the weights with the highest validation mAP50-95.
+
+    Validation loss is not used for selection: the end-to-end loss schedule shifts weight from
+    the one-to-many to the one-to-one head each epoch, so loss values are not comparable across
+    epochs.
+
+    The optimisation follows Ultralytics' trainer: the summed (not averaged) loss is
+    back-propagated, gradients build up over about `nominal_batch_size` images per optimiser
+    step, and learning rate, momentum and accumulation warm up over `warmup_epochs` before a
+    linear learning-rate decay.
 
     With a `teacher`, each batch carries RGB + event channels: the student trains on the RGB
     channels while the frozen teacher sees all of them, and `lambda_distill` weights the
@@ -69,10 +103,14 @@ def train_model(
     latest_path = Path(latest_path)
 
     ema = ModelEMA(model)
-    scheduler = CosineAnnealingLR(optimiser, T_max=total_epochs, eta_min=1e-6)
+    # A closed-form schedule, so warmup can rescale the learning rate within an epoch without
+    # disturbing the next epoch's value
+    scheduler = LambdaLR(optimiser, lambda epoch: lr_factor(epoch, total_epochs))
 
     checkpoint_info = load_checkpoint(latest_path, device, model, optimiser, ema, scheduler)
     past_epochs = checkpoint_info["past_epochs"]
+    if past_epochs:
+        logger.info("Resumed from %s after epoch %d", latest_path, past_epochs)
 
     if past_epochs >= total_epochs:
         logger.info(
@@ -83,10 +121,26 @@ def train_model(
 
     # Get the historical best stats so we only overwrite if we beat the previous best
     best_stats = fetch_best_dict(checkpoint_path, device, model, optimiser, mode = 0)
-    best_val_loss = best_stats["best_val_loss"]
+    best_map50_95 = best_stats["best_map50_95"]
 
     num_batches = len(train_loader)
     log_every = max(1, num_batches // 20)
+    batch_size = train_loader.batch_size
+    full_accumulate = accumulation_steps(batch_size, nominal_batch_size)
+    # Like Ultralytics, always leave at least the final epoch out of the warmup
+    warmup_batches = round(min(warmup_epochs, max(total_epochs - 1, 0)) * num_batches)
+    logger.info(
+        "Optimiser steps every %d batches (%d images) after a warmup of %d batches",
+        full_accumulate,
+        full_accumulate * batch_size,
+        warmup_batches,
+    )
+
+    # Gradients are cleared once here and after each step; like Ultralytics, a partly built-up
+    # step carries over into the next epoch.
+    optimiser.zero_grad()
+    # On resume, start accumulating afresh at the first batch of the next epoch
+    last_step_batch = past_epochs * num_batches - 1
 
     for epoch in range(past_epochs, total_epochs):
 
@@ -98,7 +152,7 @@ def train_model(
             "Epoch started epoch = %d/%d lr = %.2e",
             epoch + 1,
             total_epochs,
-            optimiser.param_groups[0]["lr"],
+            min(group["lr"] for group in optimiser.param_groups),
         )
 
         model.train()
@@ -106,14 +160,25 @@ def train_model(
         if teacher is not None:
             totals["distill_loss"] = 0.0
         images_seen = 0
+        grad_norm = float("nan")
         epoch_start = time.monotonic()
         if device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(device)
 
         for step, (imgs, targets) in enumerate(train_loader, start=1):
 
+            batch_index = epoch * num_batches + step - 1
+            accumulate = full_accumulate
+            if batch_index < warmup_batches:
+                accumulate = max(1, round(interpolate(batch_index, warmup_batches, 1, nominal_batch_size / batch_size)))
+                for group in optimiser.param_groups:
+                    target_lr = group["initial_lr"] * lr_factor(epoch, total_epochs)
+                    group["lr"] = interpolate(batch_index, warmup_batches, 0.0, target_lr)
+                    group["momentum"] = interpolate(
+                        batch_index, warmup_batches, WARMUP_MOMENTUM, MOMENTUM_AFTER_WARMUP
+                    )
+
             batch_data = _prepare_yolo_batch(imgs, targets, device)
-            optimiser.zero_grad()
 
             if teacher is None:
                 loss, loss_items = model(batch_data)
@@ -127,20 +192,23 @@ def train_model(
                     teacher_preds = teacher(batch_data["img"])
                 distill_loss = feature_distillation_loss(student_preds, teacher_preds)
 
-            batch_loss = loss.sum() / imgs.shape[0]
+            total_loss = loss.sum()
             if distill_loss is not None:
-                batch_loss = batch_loss + lambda_distill * distill_loss
-            if not torch.isfinite(batch_loss):
+                total_loss = total_loss + lambda_distill * distill_loss * imgs.shape[0]
+            if not torch.isfinite(total_loss):
                 message = f"Non-finite training loss at epoch {epoch + 1} step {step}."
                 logger.error(message)
                 raise ValueError(message)
-            batch_loss.backward()
+            total_loss.backward()
 
-            grad_norm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0))
+            if batch_index - last_step_batch >= accumulate:
+                grad_norm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0))
+                optimiser.step()
+                optimiser.zero_grad()
+                ema.update(model)
+                last_step_batch = batch_index
 
-            optimiser.step()
-            ema.update(model)
-
+            batch_loss = total_loss.detach() / imgs.shape[0]
             step_losses = {"loss": batch_loss.item()}
             step_losses.update({name: float(loss_items[name]) for name in ("box_loss", "cls_loss", "l1_loss")})
             if distill_loss is not None:
@@ -188,9 +256,14 @@ def train_model(
         val_results = validate_model(val_loader, ema.ema, device, logger)
         val_time = time.monotonic() - val_start
         avg_val_loss = val_results["loss"]
+        val_map50_95 = val_results["map50_95"]
 
         if not math.isfinite(avg_val_loss):
             message = "Non-finite validation loss; cannot select a best checkpoint."
+            logger.error(message)
+            raise ValueError(message)
+        if not math.isfinite(val_map50_95):
+            message = "Non-finite validation mAP50-95; cannot select a best checkpoint."
             logger.error(message)
             raise ValueError(message)
 
@@ -209,11 +282,18 @@ def train_model(
         # Always save the latest checkpoint to resume training if interrupted
         torch.save(checkpoint_dict, latest_path)
 
-        # Save best model if val_loss is lower than the current best_val_loss
-        is_best = avg_val_loss < best_val_loss
+        # Save best model if mAP50-95 beats the current best; ties keep the earlier epoch
+        is_best = val_map50_95 > best_map50_95
         if is_best:
             torch.save(checkpoint_dict, checkpoint_path)
-            best_val_loss = avg_val_loss
+            logger.info(
+                "New best weights saved epoch = %d mAP50-95 = %.4f (previous best = %.4f) path = %s",
+                epoch + 1,
+                val_map50_95,
+                best_map50_95,
+                checkpoint_path,
+            )
+            best_map50_95 = val_map50_95
 
         logger.info(
             "Epoch completed epoch = %d/%d train_time = %s val_time = %s best_checkpoint = %s",
@@ -221,7 +301,7 @@ def train_model(
             total_epochs,
             format_duration(train_time),
             format_duration(val_time),
-            "saved" if is_best else "unchanged (best val_loss = %.4f)" % best_val_loss,
+            "saved" if is_best else "unchanged (best mAP50-95 = %.4f)" % best_map50_95,
         )
         for split, results in (("train", train_results), ("val", val_results)):
             logger.info(
@@ -254,11 +334,21 @@ def train_model(
         raise RuntimeError(message)
     return checkpoint_path
 
+# Settings that may change when resuming: they affect speed and logging, not the training itself
+RESUME_OVERRIDES = ("num_workers", "console_level")
+
+
 def parse_args(description: str) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument(
-        "--dataset-path", type=Path, required=True,
-        help="DSEC root with labelled train and val directories.",
+        "--dataset-path", type=Path, default=None,
+        help="DSEC root with labelled train and val directories. Required unless resuming.",
+    )
+    parser.add_argument(
+        "--resume", type=Path, default=None, metavar="RUN_DIR",
+        help="Continue an interrupted run (e.g. runs/student/exp_006) from its latest checkpoint. "
+             "All settings come from the original run; only --num-workers and --console-level "
+             "may be given again.",
     )
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--num-workers", type=int, default=0)
@@ -304,11 +394,24 @@ def parse_args(description: str) -> argparse.Namespace:
         help="Weight of the distillation term added to the detection loss.",
     )
     parser.add_argument(
+        "--seed", type=int, default=0,
+        help="Seed for model initialisation, shuffling and augmentation. Use the same seed for "
+             "every student you compare.",
+    )
+    parser.add_argument(
+        "--no-augment", action="store_true",
+        help="Train on unaugmented frames, e.g. for the tiny-subset overfit test.",
+    )
+    parser.add_argument(
         "--console-level", type = str, default = "INFO",
         choices = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         help = "Set the logging level.",
     )
     args = parser.parse_args()
+    if args.resume is not None:
+        args = resumed_args(parser, args)
+    elif args.dataset_path is None:
+        parser.error("--dataset-path is required unless resuming")
     try:
         args.augmentation_seed = validate_augmentation_seed(args.augmentation_seed)
         args.degradation_shares = validate_degradation_shares(args.degradation_shares)
@@ -322,6 +425,39 @@ def parse_args(description: str) -> argparse.Namespace:
         parser.error("--lambda-distill must be non-negative")
     return args
 
+
+def resumed_args(parser: argparse.ArgumentParser, given: argparse.Namespace) -> argparse.Namespace:
+    """Rebuild a run's original settings from its folder, keeping the allowed overrides."""
+    run_directory = given.resume
+    if not run_directory.is_dir():
+        parser.error(f"--resume: run folder not found: {run_directory}")
+
+    changed = [
+        "--" + name.replace("_", "-")
+        for name, value in vars(given).items()
+        if name not in ("resume", *RESUME_OVERRIDES) and value != parser.get_default(name)
+    ]
+    if changed:
+        parser.error(
+            f"--resume takes its settings from the original run, so {', '.join(changed)} cannot "
+            "be changed. Start a new run instead."
+        )
+
+    original_command = log.load_command(run_directory)
+    script = Path(sys.argv[0]).name
+    if Path(original_command[0]).name != script:
+        parser.error(
+            f"--resume: {run_directory} was started with {Path(original_command[0]).name}, "
+            f"not {script}"
+        )
+
+    args = parser.parse_args(original_command[1:])
+    args.resume = run_directory
+    for name in RESUME_OVERRIDES:
+        if getattr(given, name) != parser.get_default(name):
+            setattr(args, name, getattr(given, name))
+    return args
+
 def main(role: str, rgb_only: bool) -> None:
     """Train, validate and test one model. `role` is "student", "teacher" or "distill"."""
     input_channels = 3 if rgb_only else 5
@@ -332,17 +468,28 @@ def main(role: str, rgb_only: bool) -> None:
     args = parse_args(description)
     if args.degradation_augmentation and (not rgb_only or args.teacher_checkpoint is not None):
         raise ValueError("--degradation-augmentation only applies to RGB-only training without a teacher")
+    resuming = args.resume is not None
 
-    log_directory = log.create_log_directory(role)
+    log_directory = args.resume if resuming else log.create_log_directory(role)
+    latest_path = log_directory / f"latest_{role}_yolo.pt"
 
     logger = log.create_logger(
         "train",
         log_directory,
         console_level=args.console_level,
     )
-    log.log_command(sys.argv, log_directory)
+    if resuming:
+        if not latest_path.is_file():
+            message = f"Cannot resume: no latest checkpoint at {latest_path}. Start a new run instead."
+            logger.error(message)
+            raise FileNotFoundError(message)
+        logger.info("Resuming %s with: %s", log_directory, " ".join(sys.argv))
+    else:
+        log.log_command(sys.argv, log_directory)
 
     device = select_device()
+    # Seed before anything random is built: the student's fresh head, the shuffle, augmentation
+    seed_everything(args.seed)
 
     distilling = args.teacher_checkpoint is not None
     if distilling and not rgb_only:
@@ -373,20 +520,22 @@ def main(role: str, rgb_only: bool) -> None:
             "augmentation_seed": args.augmentation_seed,
         } if args.degradation_augmentation else {}
     )
+    train_settings = dict(augment=not args.no_augment, seed=args.seed)
     train_loader, val_loader = create_dataloaders(
-        rgb_only=rgb_only, **loader_settings, **augmentation_settings,
+        rgb_only=rgb_only, **loader_settings, **train_settings, **augmentation_settings,
     )
     if distilling:
         # The teacher needs the paired event channels, so training re-reads with events while
-        # validation keeps the RGB-only loader built above.
-        train_loader, _ = create_dataloaders(rgb_only=False, **loader_settings)
+        # validation keeps the RGB-only loader built above. Augmentation makes the same random
+        # draws either way, so the student sees the same RGB views as the RGB-only baseline.
+        train_loader, _ = create_dataloaders(rgb_only=False, **loader_settings, **train_settings)
 
-    optimiser = create_optimiser(model)
+    optimiser = create_optimiser(model, batch_size=args.batch_size)
 
     config = {
         'Model': role,
         'Input Channels': input_channels,
-        'Selected Device': device,
+        'Selected Device': str(device),
         'Epochs': args.epochs,
         'Training Samples': len(train_loader.dataset),
         'Validation Samples': len(val_loader.dataset),
@@ -398,6 +547,13 @@ def main(role: str, rgb_only: bool) -> None:
         'Console Level' : args.console_level,
         'Skip Test Evaluation': args.skip_test,
         'Max Samples': args.max_samples,
+        'Seed': args.seed,
+        'Flip Scale Colour Augmentation': not args.no_augment,
+        'Nominal Batch Size': NOMINAL_BATCH_SIZE,
+        'Warmup Epochs': WARMUP_EPOCHS,
+        'Optimiser': type(optimiser).__name__,
+        'Learning Rate': OPTIMISER_LR,
+        'Deterministic': True,
         'Teacher Checkpoint': str(args.teacher_checkpoint) if distilling else None,
         'Lambda Distill': args.lambda_distill if distilling else None,
         'Training Augmentation': {
@@ -414,7 +570,6 @@ def main(role: str, rgb_only: bool) -> None:
     log.log_model_config(config, log_directory, logger)
 
     best_path = log_directory / f"best_{role}_yolo.pt"
-    latest_path = log_directory / f"latest_{role}_yolo.pt"
 
     checkpoint_path = train_model(
         train_loader,

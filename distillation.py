@@ -14,8 +14,10 @@ import torch.nn.functional as F
 from utils import build_model
 
 # Neck features fed to the detection head. The student and teacher share this architecture,
-# so the feature maps already match and need no projection layer.
-DISTILL_TARGET = "one2one"
+# so the feature maps already match and need no projection layer. Both head branches hold the
+# same neck features, but in training mode the one2one branch gets them detached, so only the
+# one2many copy lets the distillation gradient reach the student's backbone and neck.
+DISTILL_TARGET = "one2many"
 
 #Level 0  is P3 (Stride 8). Levels 1 and 2 are P4 (stride 16) and P5 (stride 32).
 DISTILL_LEVEL = 0
