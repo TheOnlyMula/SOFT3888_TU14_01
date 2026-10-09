@@ -1,0 +1,18 @@
+{
+  "measured_utc": "2026-09-20T12:11:07+00:00",
+  "split": "train",
+  "sequences": 41,
+  "frames_read": 52686,
+  "all_frames": true,
+  "percentile": 99.9,
+  "event_scale_k": 44,
+  "percentiles": {
+    "50": 2,
+    "90": 7,
+    "99": 18,
+    "99.9": 44
+  },
+  "max_count": 829,
+  "non_zero_pixels": 11203045915,
+  "total_pixels": 32370278400
+}

@@ -42,11 +42,11 @@ def darken(img: np.ndarray, strength: str | float, seed: int = 0) -> dict:
     img_tensor = img_tensor.permute(2, 0, 1)
 
     if (low == 0 and high == 0): # If strength bounds are 0, return completely black image
-        return {'image': np.zeros_like(img_tensor),
+        return {'image': np.zeros(img.shape, dtype=np.uint8),
                 'seed': seed,
-                'global_illum_factor': 0,
-                'mean_brightness': 0,
-                'proportion_dark': 1}
+                'global_illum_factor': 0.0,
+                'mean_brightness': 0.0,
+                'proportion_dark': 1.0}
     
     else:
         # Convert sRGB to linear RGB
@@ -102,8 +102,8 @@ def darken(img: np.ndarray, strength: str | float, seed: int = 0) -> dict:
 
             # Add simulated read noise (simple Gaussian noise model)
             read_noise_sigma = 0.005
-            read_noise = torch.randn_like(img_noisy, device=img_noisy.device,
-                                        generator=generator) * read_noise_sigma
+            read_noise = torch.randn(img_noisy.shape, dtype=img_noisy.dtype, device=img_noisy.device,
+                                     generator=generator) * read_noise_sigma
             img_noisy += read_noise
 
         # Clamp resultant image such that values are bounded by 0 and 1

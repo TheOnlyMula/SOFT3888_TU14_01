@@ -241,7 +241,8 @@ For each degraded image, strength is drawn uniformly
 from the selected condition's range. Both ranges default to the benchmark's
 `mild` (0.35) through `strong` (1.0) levels. Bounds must satisfy
 `0 <= MIN <= MAX <= 1`; equal bounds give a fixed strength. Clean images do not
-draw a strength. Darkening still uses the existing temporary darkening function.
+draw a strength. Darkening uses `darkening.darken`, mapped onto this strength
+scale exactly as in the benchmark (see below).
 These options are for the RGB-only student without a teacher checkpoint and do
 not change benchmark settings.
 
@@ -328,6 +329,8 @@ PYTHONPATH=. python evaluate.py \
 The benchmark reports mAP@0.5, mAP@0.5:0.95, recall, and the performance drop from the clean condition.
 
 `--degradation-strength` accepts the named levels `mild` (0.35) and `strong` (1.0) defined in `overexposure.py`, or a number in [0, 1]. The same value is used for the darkened and over-exposed conditions, and over-exposure is applied by `overexposure.overexpose`.
+
+Darkening is applied by `darkening.darken`, which works on an illumination scale instead (1 = unchanged). The benchmark strength maps linearly onto it: `illumination = 1 - 0.8 * strength`, so strength 0 leaves images unchanged, `mild` (0.35) dims to 72% illumination and `strong` (1.0) dims to darkening's own `strong` level (20%). Each frame's illumination field and sensor noise come from its per-frame seed. The degradation-augmentation baseline uses the same mapping, so its training darkening matches this benchmark condition.
 
 The evaluation seed keeps benchmark inputs reproducible. Each condition also produces an RGB fingerprint, which can be compared between runs to confirm that the same input images were evaluated.
 

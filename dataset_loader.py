@@ -13,7 +13,8 @@ from torch.utils.data import Dataset, DataLoader, Subset, get_worker_info
 from dsec_det.dataset import DSECDet
 from dsec_det.label import CLASSES, COLORS
 from dsec_det.io import extract_from_h5_by_timewindow, yaml_file_to_dict
-from overexposure import STRENGTH_LEVELS, overexpose
+from overexposure import STRENGTH_LEVELS, overexpose, resolve_strength
+from darkening import STRENGTH_RANGES as DARKENING_LEVELS, darken
 from augment import augment_sample
 import logging
 from ultralytics import YOLO
@@ -33,6 +34,9 @@ EVENT_SCALE_K = 44.0
 DEFAULT_DEGRADATION_SHARES = (0.5, 0.25, 0.25)
 DEFAULT_STRENGTH_RANGE = (STRENGTH_LEVELS["mild"], STRENGTH_LEVELS["strong"])
 DEFAULT_AUGMENTATION_SEED = 0
+
+# Illumination factor that benchmark strength 1 ("strong") darkens to: darkening's "strong" level
+DARKEST_ILLUMINATION = DARKENING_LEVELS["strong"]
 
 
 def validate_augmentation_seed(seed):
@@ -69,7 +73,7 @@ def augment_rgb_degradation(
     condition = rng.choice(("clean", "dark", "overexposed"), p=shares)
     if condition == "dark":
         strength = rng.uniform(*dark_strength_range)
-        return apply_dark_degradation(image, strength=strength, rng=rng)
+        return apply_dark_degradation(image, strength=strength, seed=int(rng.integers(2**63)))
     if condition == "overexposed":
         strength = rng.uniform(*overexposed_strength_range)
         return overexpose(image, strength)
@@ -91,44 +95,17 @@ def degradation_seed(
     return int.from_bytes(digest[:8], byteorder="little", signed=False)
 
 
-def apply_dark_degradation(
-    image: np.ndarray,
-    strength: float,
-    rng: np.random.Generator,
-) -> np.ndarray:
-    """Temporary darkening, to be replaced by the darkening module.
+def apply_dark_degradation(image: np.ndarray, strength: float, seed: int) -> np.ndarray:
+    """Darken an RGB uint8 image with `darkening.darken` on the shared benchmark strength scale.
+
+    Strength 0 leaves the image unchanged, strength 1 ("strong") is darkening's own "strong" level, and the illumination falls
+    linearly in between, so "mild" (0.35) dims to 72% illumination. `seed` fixes the
+    illumination field and sensor noise.
     """
-    image_f = image.astype(np.float32)
-
-    # Darken the image first.
-    alpha = max(0.0, 1.0 - 0.7 * strength)
-    darkened = image_f * alpha
-
-    # Add deterministic per-frame noise.
-    noise_std = 25.0 * strength
-    noise = rng.normal(0.0, noise_std, size=image.shape).astype(np.float32)
-
-    degraded = darkened + noise
-    return np.clip(degraded, 0, 255).astype(np.uint8)
-
-
-def resolve_degradation_strength(strength: str | float) -> float:
-    """Turn a named level ("mild"/"strong") into its number; pass through a value in [0, 1].
-
-    Both degradations share this scale, and the resolved number goes into the per-frame seed,
-    so "strong" and 1.0 describe the same benchmark.
-    """
-    if isinstance(strength, str):
-        if strength not in STRENGTH_LEVELS:
-            raise ValueError(
-                f"degradation strength must be a number in [0, 1] or one of {sorted(STRENGTH_LEVELS)}"
-            )
-        return STRENGTH_LEVELS[strength]
-
-    value = float(strength)
-    if not 0.0 <= value <= 1.0:
-        raise ValueError("degradation_strength must be between 0 and 1")
-    return value
+    if strength == 0:
+        return image.copy()
+    illumination = 1.0 - (1.0 - DARKEST_ILLUMINATION) * strength
+    return darken(image, illumination, seed=seed)["image"]
 
 
 def update_rgb_fingerprint(hasher, images: torch.Tensor) -> None:
@@ -207,7 +184,7 @@ class DSECFusionDataset(Dataset):
             raise ValueError(f"degradation must be one of {sorted(valid_degradations)}")
 
         self.degradation = degradation
-        self.degradation_strength = resolve_degradation_strength(degradation_strength)
+        self.degradation_strength = resolve_strength(degradation_strength)
         self.evaluation_seed = evaluation_seed
         # Training-only flip, scale, shift and hue/saturation jitter (see augment.py)
         self.augment = augment
@@ -267,7 +244,6 @@ class DSECFusionDataset(Dataset):
             )
         elif self.degradation == "dark":
             # Only darkening is random, so only it needs a per-frame seed.
-            # The darkening module will replace apply_dark_degradation here.
             frame_index, _, directory = self.base_dataset.rel_index(idx)
             frame_seed = degradation_seed(
                 evaluation_seed=self.evaluation_seed,
@@ -277,9 +253,7 @@ class DSECFusionDataset(Dataset):
                 strength=self.degradation_strength,
             )
             image = apply_dark_degradation(
-                image,
-                strength=self.degradation_strength,
-                rng=np.random.default_rng(frame_seed),
+                image, strength=self.degradation_strength, seed=frame_seed
             )
         elif self.degradation == "overexposed":
             image = overexpose(image, self.degradation_strength)

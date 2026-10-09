@@ -11,10 +11,9 @@ from ultralytics.models.yolo.detect import DetectionValidator
 from ultralytics.utils.metrics import DetMetrics
 from dataset_loader import (
     create_test_loader,
-    resolve_degradation_strength,
     rgb_loader_fingerprint,
 )
-from overexposure import STRENGTH_LEVELS
+from overexposure import STRENGTH_LEVELS, resolve_strength
 from utils import extract_trainable_model, select_device
 
 
@@ -302,7 +301,7 @@ def evaluate_test_model(
 def degradation_strength_argument(value: str) -> float:
     """Accept a named level or a number on the command line."""
     try:
-        return resolve_degradation_strength(value if value in STRENGTH_LEVELS else float(value))
+        return resolve_strength(value if value in STRENGTH_LEVELS else float(value))
     except ValueError as exc:
         raise argparse.ArgumentTypeError(str(exc)) from exc
 
