@@ -424,3 +424,51 @@ Generate examples and descriptive measurements into a new output directory:
 ```bash
 python tools/generate_overexposure_examples.py --image "/path/to/rgb.png" --output-dir "runs/issue41_examples/sample_01"
 ```
+
+## Deterministic darkening (Issue #40)
+
+`darken(image, strength, seed = 0)` takes the following inputs:
+- `image`: a non-empty `H x W x 3` array
+- `strength`: the intensity of darkening; can be a predefined named level (`minimal`, `mild`, `medium`, `strong`) or a constant between 0 and 1
+- `seed`: an optional integer to determine noise generation & illumination mapping; 0 by default
+
+The method returns a dictionary containing the following: 
+```python
+{
+  'image': ..., # A new, same-shape `uint8` darkened RGB array with added noise
+  'seed': ..., # Seed used to generate the illumination map & noise
+  'global_illum_factor': ..., # Global illumination factor sampled from a designated range (see below)
+  'mean_brightness': ..., # Mean brightness of the resultant image
+  'proportion_dark': ..., # Proportion of discernably dark pixels in the resultant image
+}
+```
+
+BGR-to-RGB conversion is performed on `image` before applying tensor normalization or event concatenation.
+
+```python
+from darkening import darkening
+minimal_rgb = darken(rgb, "minimal", seed = 1234)
+mild_rgb = darken(rgb, "mild", seed = 1234)
+medium_rgb = darken(rgb, "medium", seed = 1234)
+strong_rgb = darken(rgb, "strong", seed = 1234)
+custom_rgb = darken(rgb, 0.6)  # Continuous strength in [0, 1].
+```
+
+| Strength level | Global illumination factor range |
+| --- | ---: |
+| minimal | [0.7, 0.9) |
+| mild | [0.5, 0.7) |
+| medium | [0.3, 0.5) |
+| strong | [0.1, 0.3) |
+
+A custom strength level `i` will generate a global illumination factor range of [`i` - 0.1, `i` + 0.1], bounded by 0 and 1. Note that `i` = 0 will generate a pitch-black image, and `i` = 1 will result in no transformation to the image.
+
+[Day examples](docs/darkening/day_000003.png) and
+[night examples](docs/darkening/night_000005.png) show result, illumination factor, mean brightness, and percentage of discernably dark pixels for each strength level for `interlaken_00_c/000003.png` and `zurich_city_09_a/000005.png` respectively.
+See the [detailed guide](docs/darkening/README.md) for more information.
+
+Generate examples and descriptive measurements into a new output directory:
+
+```bash
+python tools/generate_darkening_examples.py --image "/path/to/rgb.png" --output-dir "runs/issue40_examples/sample_01"
+```
