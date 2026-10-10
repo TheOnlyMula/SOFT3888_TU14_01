@@ -336,6 +336,29 @@ The evaluation seed keeps benchmark inputs reproducible. Each condition also pro
 
 For fair comparisons between models, use the same dataset split, degradation settings, evaluation seed, and benchmark configuration.
 
+### Export and compare benchmark results
+
+After the evaluation code is committed, run each checkpoint with the same dataset release, seed, strength, and sample limit. Add these options to the benchmark command above:
+
+```bash
+  --model-name rgb_baseline \
+  --dataset-id dsec-left-annotations-v1 \
+  --benchmark-report runs/benchmark_reports/rgb_baseline.json
+```
+
+Choose a `--dataset-id` that identifies the **actual image and annotation version** used by the team; the example is only a placeholder. Use a different report path and one of `rgb_baseline`, `rgb_augmented`, `naive_distillation`, `proposed_event`, or `teacher` for each checkpoint. For the teacher, use `--type teacher --model-name teacher`. The exported JSON records the checkpoint path and SHA-256 hash, code commit and clean/dirty state, dataset ID and path, test split, seed, strength, sample limit, parameter count, metrics, and per-condition RGB fingerprints. It contains measured results only; it does not create a score for a model that has not been evaluated.
+
+When reports are available, combine them with:
+
+```bash
+python tools/compare_benchmark_reports.py \
+  runs/benchmark_reports/rgb_baseline.json \
+  runs/benchmark_reports/rgb_augmented.json \
+  --output-dir runs/benchmark_comparison
+```
+
+This writes `comparison.json` and `comparison.csv`. Output files must be new: rerunning with an existing report path or comparison output directory containing these files raises an error instead of replacing them. Missing milestone models appear as `missing` with blank metrics. The comparison rejects duplicate model names or checkpoints, uncommitted or unknown evaluation code, mismatched code commits, dataset IDs, test splits, strengths, seeds, sample limits, or RGB input fingerprints. A matching dataset ID is supplied by the team and cannot itself verify that annotations are identical; use the same agreed dataset copy and annotation version. Training checkpoints may come from different commits, but evaluate all of them with one committed evaluation-code version. Batch size and worker count are recorded but may differ if the input fingerprints still match. Runtime measurements and qualitative examples require separate collection before the main evaluation milestone is complete.
+
 ### Event representation
 
 The teacher's event channels are a 2-channel positive/negative histogram over the causal window, log-scaled and normalised into [0, 1]:

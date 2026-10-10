@@ -431,7 +431,25 @@ if __name__ == "__main__":
         help='Degradation strength: "mild", "strong", or a number in [0, 1].',
     )
     parser.add_argument("--evaluation-seed", type=int, default=0)
+    parser.add_argument(
+        "--benchmark-report", type=Path,
+        help="Save benchmark metrics and provenance as JSON at this path.",
+    )
+    parser.add_argument(
+        "--model-name",
+        help="Model label for a benchmark report, e.g. rgb_baseline or naive_distillation.",
+    )
+    parser.add_argument(
+        "--dataset-id",
+        help="Shared identifier for the exact DSEC image and annotation release.",
+    )
     args = parser.parse_args()
+    if args.benchmark_report and not args.benchmark:
+        parser.error("--benchmark-report requires --benchmark")
+    if args.benchmark_report and (not args.model_name or not args.dataset_id or not args.dataset_id.strip()):
+        parser.error("--benchmark-report requires --model-name and --dataset-id")
+    if args.benchmark_report and (args.model_name == "teacher") != (args.type == "teacher"):
+        parser.error("--model-name teacher must match --type teacher")
 
     log_directory = log.create_log_directory(args.type)
     logger = log.create_logger("evaluate", log_directory)
@@ -469,6 +487,25 @@ if __name__ == "__main__":
                 condition,
                 result["fingerprint"],
             )
+        if args.benchmark_report:
+            from benchmark_reporting import build_report, save_json
+
+            report = build_report(
+                benchmark_results,
+                model_name=args.model_name,
+                model_type=args.type,
+                model=model,
+                checkpoint_path=args.weights,
+                dataset_path=args.dataset_path,
+                dataset_id=args.dataset_id.strip(),
+                degradation_strength=args.degradation_strength,
+                evaluation_seed=args.evaluation_seed,
+                max_samples=args.max_samples,
+                batch_size=args.batch_size,
+                num_workers=args.num_workers,
+            )
+            save_json(args.benchmark_report, report)
+            logger.info("Benchmark report saved to %s", args.benchmark_report)
 
     else:
         test_loader = create_test_loader(
