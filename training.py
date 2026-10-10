@@ -24,14 +24,14 @@ from dataset_loader import (
     validate_degradation_shares, validate_strength_range, validate_augmentation_seed,
 )
 from distillation import feature_distillation_loss, load_teacher
-from ultralytics.utils.torch_utils import ModelEMA
+import numpy as np
+from ultralytics.utils.torch_utils import ModelEMA, init_seeds
 from torch.optim.lr_scheduler import LambdaLR
 from utils import (
     NOMINAL_BATCH_SIZE,
     OPTIMISER_LR,
     accumulation_steps,
     select_device,
-    seed_everything,
     extract_trainable_model,
     create_optimiser,
     load_checkpoint,
@@ -51,11 +51,6 @@ FINAL_LR_FRACTION = 0.01
 def lr_factor(epoch: int, total_epochs: int) -> float:
     """Fraction of the starting learning rate used in `epoch` (Ultralytics' linear schedule)."""
     return max(1 - epoch / total_epochs, 0) * (1 - FINAL_LR_FRACTION) + FINAL_LR_FRACTION
-
-
-def interpolate(position: float, end: float, start_value: float, end_value: float) -> float:
-    """Linear ramp from `start_value` at 0 to `end_value` at `end`."""
-    return start_value + (end_value - start_value) * min(max(position / end, 0.0), 1.0)
 
 
 def format_duration(seconds: float) -> str:
@@ -170,12 +165,13 @@ def train_model(
             batch_index = epoch * num_batches + step - 1
             accumulate = full_accumulate
             if batch_index < warmup_batches:
-                accumulate = max(1, round(interpolate(batch_index, warmup_batches, 1, nominal_batch_size / batch_size)))
+                ramp = [0, warmup_batches]
+                accumulate = max(1, round(float(np.interp(batch_index, ramp, [1, nominal_batch_size / batch_size]))))
                 for group in optimiser.param_groups:
                     target_lr = group["initial_lr"] * lr_factor(epoch, total_epochs)
-                    group["lr"] = interpolate(batch_index, warmup_batches, 0.0, target_lr)
-                    group["momentum"] = interpolate(
-                        batch_index, warmup_batches, WARMUP_MOMENTUM, MOMENTUM_AFTER_WARMUP
+                    group["lr"] = float(np.interp(batch_index, ramp, [0.0, target_lr]))
+                    group["momentum"] = float(
+                        np.interp(batch_index, ramp, [WARMUP_MOMENTUM, MOMENTUM_AFTER_WARMUP])
                     )
 
             batch_data = _prepare_yolo_batch(imgs, targets, device)
@@ -247,6 +243,8 @@ def train_model(
                     targets.shape[0],
                 )
 
+        # The base rate the epoch ended on (the classification head's groups run at a multiple of it)
+        epoch_lr = min(group["lr"] for group in optimiser.param_groups)
         scheduler.step()
         train_time = time.monotonic() - epoch_start
         train_results = {name: total / num_batches for name, total in totals.items()}
@@ -327,6 +325,24 @@ def train_model(
             val_results["map50_95"],
             val_results["agnostic_map50"],
         )
+
+        loss_names = ("loss", "box_loss", "cls_loss", "l1_loss")
+        row = {"epoch": epoch + 1}
+        row.update({f"train/{name}": train_results[name] for name in loss_names})
+        if teacher is not None:
+            row["train/distill_loss"] = train_results["distill_loss"]
+        row.update({
+            "metrics/precision": val_results["precision"],
+            "metrics/recall": val_results["recall"],
+            "metrics/mAP50": val_results["map50"],
+            "metrics/mAP50-95": val_results["map50_95"],
+        })
+        if teacher is not None:
+
+            row["metrics/agnostic_mAP50"] = val_results["agnostic_map50"]
+        row.update({f"val/{name}": val_results[name] for name in loss_names})
+        row["lr"] = epoch_lr
+        log.log_epoch_results(row, checkpoint_path.parent)
 
     if not checkpoint_path.is_file():
         message = "No best checkpoint was saved during this run."
@@ -489,14 +505,13 @@ def main(role: str, rgb_only: bool) -> None:
 
     device = select_device()
     # Seed before anything random is built: the student's fresh head, the shuffle, augmentation
-    seed_everything(args.seed)
+    init_seeds(args.seed, deterministic=True)
 
     distilling = args.teacher_checkpoint is not None
     if distilling and not rgb_only:
         message = "--teacher-checkpoint only applies to the RGB student."
         logger.error(message)
         raise ValueError(message)
-    teacher = load_teacher(args.teacher_checkpoint, device, logger) if distilling else None
 
     model = extract_trainable_model(
         ch=input_channels,
@@ -504,6 +519,9 @@ def main(role: str, rgb_only: bool) -> None:
         device=device,
         epochs=args.epochs,
     )
+    # Build the teacher after the student: its random initialisation (overwritten by the checkpoint)
+    # would otherwise shift the student's fresh head away from the RGB baseline's for the same seed
+    teacher = load_teacher(args.teacher_checkpoint, device, logger) if distilling else None
 
     loader_settings = dict(
         dataset_path = args.dataset_path,

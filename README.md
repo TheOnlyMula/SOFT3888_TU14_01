@@ -69,7 +69,7 @@ The shared training pipeline used by both models. It:
 - accumulates gradients to about 64 images per optimiser step, as Ultralytics does,
 - follows Ultralytics' YOLO26 optimisation recipe: MuSGD (lr 0.01, Nesterov momentum, 3x learning rate on the detection head's classification layers, weight decay on conv and linear weights only), the summed rather than averaged loss, a 3-epoch warmup of learning rate, momentum and accumulation, then a linear decay to 1%,
 - runs with deterministic GPU kernels (as Ultralytics does), which costs some speed,
-- logs training metrics,
+- logs training metrics, and after every epoch adds them to the run's `results.csv` and redraws the training curves in `results.png` (Ultralytics' `plot_results`),
 - saves the best validation checkpoint,
 - optionally runs a final test evaluation.
 

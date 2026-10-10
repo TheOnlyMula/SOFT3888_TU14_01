@@ -211,13 +211,13 @@ class DSECFusionDataset(Dataset):
         hist = np.zeros((2, height, width), dtype=np.float32)
 
         if events is not None and len(events.get("x", [])) > 0:
-            x = events["x"].astype(int)
-            y = events["y"].astype(int)
-            p = events["p"].astype(int)
+            # int64 first: p is uint8 and y uint16, so the flat index would overflow
+            x = events["x"].astype(np.int64)
+            y = events["y"].astype(np.int64)
+            p = events["p"].astype(np.int64)
 
-            # Channel 0 (Negative/0), Channel 1 (Positive/1)
-            np.add.at(hist[0], (y[p == 0], x[p == 0]), 1)
-            np.add.at(hist[1], (y[p == 1], x[p == 1]), 1)
+            counts = np.bincount((p * height + y) * width + x, minlength=2 * height * width)
+            hist = counts.reshape(2, height, width).astype(np.float32)
 
         # Log scaling compresses the heavy tail (a typical active pixel sees ~2 events,
         # the busiest hundreds), then the fixed divisor bounds the channels to [0, 1].

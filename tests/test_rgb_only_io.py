@@ -96,6 +96,27 @@ class RgbOnlyIoTests(unittest.TestCase):
         self.assertGreaterEqual(histogram.min().item(), 0.0)
         self.assertLessEqual(histogram.max().item(), 1.0)
 
+    @patch("dataset_loader.DSECDet")
+    def test_histogram_counts_match_per_pixel_accumulation(self, dataset_class):
+        # DSEC dtypes (uint16 coordinates, uint8 polarity) and a non-square frame, so an index
+        # that overflowed or swapped height and width would land events on the wrong pixel
+        height, width, n = 6, 9, 5000
+        rng = np.random.default_rng(0)
+        events = {
+            "x": rng.integers(0, width, n).astype(np.uint16),
+            "y": rng.integers(0, height, n).astype(np.uint16),
+            "p": rng.integers(0, 2, n).astype(np.uint8),
+        }
+        expected = np.zeros((2, height, width), dtype=np.float32)
+        np.add.at(expected, (events["p"].astype(int), events["y"].astype(int), events["x"].astype(int)), 1)
+        expected = torch.log1p(torch.from_numpy(expected)) / math.log1p(EVENT_SCALE_K)
+
+        histogram = DSECFusionDataset(Path("fake"), rgb_only=False).generate_event_histogram(
+            events, height=height, width=width
+        )
+
+        torch.testing.assert_close(histogram, expected.clamp(max=1.0), rtol=0, atol=0)
+
     @patch("dataset_loader.event_time_offset_us", return_value=1_020_000)
     @patch("dataset_loader.extract_from_h5_by_timewindow")
     @patch("dataset_loader.DSECDet")

@@ -31,6 +31,15 @@ def non_empty(optimiser):
     return [g for g in optimiser.param_groups if g["params"]]
 
 
+def groups_named(optimiser, name):
+    """Both halves (3x and 1x learning rate) of the optimiser groups with this `param_group` name."""
+    return [g for g in optimiser.param_groups if g["param_group"] == name]
+
+
+def ids_in(groups):
+    return set().union(*(param_ids(g) for g in groups))
+
+
 def group_named(optimiser, name):
     """The non-boosted optimiser group with this Ultralytics `param_group` name."""
     return next(
@@ -144,50 +153,35 @@ class TrainRgbStudentTests(unittest.TestCase):
                 self.assertEqual(model.names, DSEC_NAMES)
 
     def test_optimiser_configuration(self):
-        model = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.Linear(4, 2))
-        model[0].requires_grad_(False)
+        model = build_model(ch=3)
         optimiser = create_optimiser(model)
 
         self.assertIsInstance(optimiser, MuSGD)
         for group in non_empty(optimiser):
-            self.assertEqual(group["lr"], OPTIMISER_LR)  # no detection head, so nothing boosted
             self.assertEqual(group["momentum"], 0.9)
             self.assertTrue(group["nesterov"])
 
-        # Matrices get the Muon update with weight decay; biases plain SGD without decay
-        muon = group_named(optimiser, "muon")
-        bias = group_named(optimiser, "bias")
-        self.assertEqual(param_ids(muon), {id(model[1].weight)})
-        self.assertTrue(muon["use_muon"])
-        self.assertEqual(muon["weight_decay"], 0.0005)
-        self.assertEqual(param_ids(bias), {id(model[1].bias)})
-        self.assertFalse(bias["use_muon"])
-        self.assertEqual(bias["weight_decay"], 0.0)
+        # Conv and linear weights get the Muon update with weight decay; biases plain SGD without
+        parameters = list(model.parameters())
+        muon = groups_named(optimiser, "muon")
+        bias = groups_named(optimiser, "bias")
+        self.assertEqual(ids_in(muon), {id(p) for p in parameters if p.ndim in (2, 4)})
+        self.assertTrue(all(g["use_muon"] and g["weight_decay"] == 0.0005 for g in muon))
+        self.assertEqual(ids_in(bias), {id(p) for name, p in model.named_parameters() if name.endswith(".bias")})
+        self.assertTrue(all(not g["use_muon"] and g["weight_decay"] == 0.0 for g in bias))
 
-        optimised = {
-            id(parameter)
-            for group in optimiser.param_groups
-            for parameter in group["params"]
-        }
-        unfrozen = {
-            id(parameter) for parameter in model.parameters() if parameter.requires_grad
-        }
-        frozen = {
-            id(parameter)
-            for parameter in model.parameters()
-            if not parameter.requires_grad
-        }
-        self.assertEqual(optimised, unfrozen)
-        self.assertTrue(optimised.isdisjoint(frozen))
+        # Every parameter is optimised exactly once
+        optimised = [id(p) for g in optimiser.param_groups for p in g["params"]]
+        self.assertEqual(sorted(optimised), sorted(id(p) for p in parameters))
 
     def test_normalisation_weights_get_no_weight_decay(self):
-        model = torch.nn.Sequential(torch.nn.Conv2d(3, 4, 3, bias=False), torch.nn.BatchNorm2d(4))
+        model = build_model(ch=3)
         optimiser = create_optimiser(model)
-        self.assertEqual(param_ids(group_named(optimiser, "muon")), {id(model[0].weight)})
-        norm = group_named(optimiser, "bn")
-        self.assertEqual(param_ids(norm), {id(model[1].weight)})
-        self.assertEqual(norm["weight_decay"], 0.0)
-        self.assertEqual(param_ids(group_named(optimiser, "bias")), {id(model[1].bias)})
+        norms = [m for m in model.modules() if isinstance(m, torch.nn.BatchNorm2d)]
+        norm_weights = groups_named(optimiser, "bn")
+        self.assertEqual(ids_in(norm_weights), {id(m.weight) for m in norms})
+        self.assertTrue(all(g["weight_decay"] == 0.0 for g in norm_weights))
+        self.assertTrue({id(m.bias) for m in norms} <= ids_in(groups_named(optimiser, "bias")))
 
     def test_yolo26_classification_head_trains_at_three_times_the_rate(self):
         model = build_model(ch=3)
@@ -326,3 +320,25 @@ class TrainRgbStudentTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EpochResultsTests(unittest.TestCase):
+    def test_results_csv_replaces_a_repeated_epoch_and_draws_the_curves(self):
+        import csv
+        import log
+
+        def row(epoch, loss):
+            return {"epoch": epoch, "train/loss": loss, "val/loss": loss,
+                    "metrics/mAP50": 0.1 * epoch, "metrics/mAP50-95": 0.05 * epoch, "lr": 0.01}
+
+        with tempfile.TemporaryDirectory() as directory:
+            for epoch, loss in ((1, 3.0), (2, 2.0), (3, 1.5)):
+                log.log_epoch_results(row(epoch, loss), Path(directory))
+            # A resumed run repeats epoch 3 after an interruption
+            log.log_epoch_results(row(3, 1.0), Path(directory))
+
+            with open(Path(directory) / "results.csv", newline="") as file:
+                saved = list(csv.DictReader(file))
+            self.assertEqual([r["epoch"] for r in saved], ["1", "2", "3"])
+            self.assertEqual(float(saved[-1]["train/loss"]), 1.0)
+            self.assertTrue((Path(directory) / "results.png").is_file())

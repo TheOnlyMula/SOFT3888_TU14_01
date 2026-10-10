@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
+import training
 from distillation import (
     DISTILL_LEVEL,
     DISTILL_TARGET,
@@ -96,6 +97,42 @@ class LoadTeacherTests(unittest.TestCase):
         build_model.assert_called_once_with(5)
         self.assertFalse(teacher.training)
         self.assertFalse(any(parameter.requires_grad for parameter in teacher.parameters()))
+
+
+class DistillationSeedTests(unittest.TestCase):
+    def student_init_draw(self, extra_args, role):
+        """Run main with real seeding and return the random draw the student is built from."""
+        draws = []
+
+        def build_student(**kwargs):
+            draws.append(torch.rand(8))
+            return MagicMock()
+
+        def build_teacher(*args, **kwargs):
+            torch.randn(10_000)  
+            return MagicMock()
+
+        loader = MagicMock()
+        with tempfile.TemporaryDirectory() as directory, patch.multiple(
+            training,
+            select_device=MagicMock(return_value=torch.device("cpu")),
+            create_dataloaders=MagicMock(return_value=(loader, loader)),
+            extract_trainable_model=MagicMock(side_effect=build_student),
+            load_teacher=MagicMock(side_effect=build_teacher),
+            create_optimiser=MagicMock(),
+            train_model=MagicMock(return_value=Path(directory) / "best.pt"),
+        ), patch.object(training.log, "create_log_directory", return_value=Path(directory)), \
+                patch.object(training.log, "create_logger", return_value=MagicMock()), \
+                patch.object(training.log, "log_command"), \
+                patch.object(training.log, "log_model_config"), \
+                patch("sys.argv", ["train", "--dataset-path", "fake", "--skip-test", *extra_args]):
+            training.main(role=role, rgb_only=True)
+        return draws[0]
+
+    def test_distilled_student_starts_from_the_same_weights_as_the_rgb_baseline(self):
+        baseline = self.student_init_draw([], role="student")
+        distilled = self.student_init_draw(["--teacher-checkpoint", "teacher.pt"], role="distill")
+        self.assertTrue(torch.equal(baseline, distilled))
 
 
 if __name__ == "__main__":
