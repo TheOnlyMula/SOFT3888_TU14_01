@@ -27,4 +27,5 @@ dependencies:
   - pip
   - pip:
     - hdf5plugin==7.0.0
+    - kornia
     - ultralytics==8.4.128

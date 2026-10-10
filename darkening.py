@@ -42,7 +42,7 @@ def darken(img: np.ndarray, strength: str | float, seed: int = 0) -> dict:
     img_tensor = img_tensor.permute(2, 0, 1)
 
     if (low == 0 and high == 0): # If strength bounds are 0, return completely black image
-        return {'image': np.zeros_like(img_tensor),
+        return {'image': np.zeros_like(img),
                 'seed': seed,
                 'global_illum_factor': 0,
                 'mean_brightness': 0,
