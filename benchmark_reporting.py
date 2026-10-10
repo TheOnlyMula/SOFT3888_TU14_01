@@ -87,7 +87,7 @@ def build_report(
 
 def save_json(path: Path, content: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as stream:
+    with path.open("x", encoding="utf-8") as stream:
         json.dump(content, stream, indent=2, allow_nan=False)
         stream.write("\n")
 
@@ -158,12 +158,15 @@ def compare_reports(paths: list[Path]) -> dict:
 
 
 def save_comparison(directory: Path, comparison: dict) -> tuple[Path, Path]:
-    directory.mkdir(parents=True, exist_ok=True)
     json_path = directory / "comparison.json"
     csv_path = directory / "comparison.csv"
+    for path in (json_path, csv_path):
+        if path.exists():
+            raise FileExistsError(f"Comparison output already exists: {path}")
+    directory.mkdir(parents=True, exist_ok=True)
     save_json(json_path, comparison)
     columns = ("model_name", "condition", "status", *METRICS)
-    with csv_path.open("w", newline="", encoding="utf-8") as stream:
+    with csv_path.open("x", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=columns)
         writer.writeheader()
         writer.writerows(comparison["rows"])

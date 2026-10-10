@@ -43,9 +43,11 @@ class BenchmarkReportingTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        self.serial = 0
 
     def write(self, name: str, report: dict) -> Path:
-        path = self.root / f"{name}.json"
+        self.serial += 1
+        path = self.root / f"{name}-{self.serial}.json"
         save_json(path, report)
         return path
 
@@ -133,6 +135,23 @@ class BenchmarkReportingTests(unittest.TestCase):
         second = self.write("augmented", candidate)
         with self.assertRaisesRegex(ValueError, "checkpoint already used"):
             compare_reports([first, second])
+
+    def test_outputs_never_overwrite_existing_files(self):
+        path = self.write("baseline", sample_report("rgb_baseline", "hash-1"))
+        original = path.read_bytes()
+        with self.assertRaises(FileExistsError):
+            save_json(path, {"changed": True})
+        self.assertEqual(path.read_bytes(), original)
+
+        comparison = compare_reports([path])
+        directory = self.root / "comparison"
+        json_path, csv_path = save_comparison(directory, comparison)
+        original_json = json_path.read_bytes()
+        original_csv = csv_path.read_bytes()
+        with self.assertRaises(FileExistsError):
+            save_comparison(directory, comparison)
+        self.assertEqual(json_path.read_bytes(), original_json)
+        self.assertEqual(csv_path.read_bytes(), original_csv)
 
 
 if __name__ == "__main__":
