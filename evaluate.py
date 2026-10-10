@@ -14,7 +14,7 @@ from dataset_loader import (
     rgb_loader_fingerprint,
 )
 from overexposure import STRENGTH_LEVELS, resolve_strength
-from utils import extract_trainable_model, select_device
+from utils import extract_trainable_model, load_weights, select_device
 
 
 def _prepare_yolo_batch(imgs, targets, device):
@@ -247,13 +247,7 @@ def evaluate_test_model(
 
     model.to(device)
     try:
-        checkpoint = torch.load(
-            checkpoint_path,
-            map_location=device,
-            weights_only=True,
-        )
-        state_dict = checkpoint.get("model_state_dict", checkpoint)
-        model.load_state_dict(state_dict, strict=True)
+        load_weights(model, checkpoint_path, device)
     except Exception as exc:
         message = f"Could not load the best checkpoint: {checkpoint_path}"
         logger.error(message)

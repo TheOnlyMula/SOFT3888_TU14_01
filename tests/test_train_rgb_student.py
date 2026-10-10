@@ -342,3 +342,27 @@ class EpochResultsTests(unittest.TestCase):
             self.assertEqual([r["epoch"] for r in saved], ["1", "2", "3"])
             self.assertEqual(float(saved[-1]["train/loss"]), 1.0)
             self.assertTrue((Path(directory) / "results.png").is_file())
+
+
+class LoadWeightsTests(unittest.TestCase):
+    def test_loads_training_checkpoints_and_bare_state_dicts(self):
+        from utils import load_weights
+
+        trained = torch.nn.Linear(3, 2)
+        with tempfile.TemporaryDirectory() as directory:
+            for name, content in (("wrapped.pt", {"model_state_dict": trained.state_dict(), "epoch": 4}),
+                                  ("bare.pt", trained.state_dict())):
+                with self.subTest(checkpoint=name):
+                    path = Path(directory) / name
+                    torch.save(content, path)
+                    model = load_weights(torch.nn.Linear(3, 2), path, "cpu")
+                    self.assertTrue(torch.equal(model.weight, trained.weight))
+
+    def test_rejects_a_checkpoint_for_another_architecture(self):
+        from utils import load_weights
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "other.pt"
+            torch.save({"model_state_dict": torch.nn.Linear(4, 2).state_dict()}, path)
+            with self.assertRaises(RuntimeError):
+                load_weights(torch.nn.Linear(3, 2), path, "cpu")

@@ -11,7 +11,7 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
-from utils import build_model
+from utils import build_model, load_weights
 
 # Neck features fed to the detection head. The student and teacher share this architecture,
 # so the feature maps already match and need no projection layer. Both head branches hold the
@@ -36,9 +36,7 @@ def load_teacher(
         logger.error(message)
         raise FileNotFoundError(message)
 
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
-    teacher = build_model(ch)
-    teacher.load_state_dict(checkpoint.get("model_state_dict", checkpoint), strict=True)
+    teacher = load_weights(build_model(ch), checkpoint_path, device)
     teacher = teacher.to(device).eval().requires_grad_(False)
 
     logger.info("Loaded frozen teacher: %s (input channels = %d)", checkpoint_path, ch)

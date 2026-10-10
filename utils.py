@@ -97,6 +97,14 @@ def create_optimiser(
     )
 
 
+def load_weights(
+    model: torch.nn.Module, checkpoint_path: str | Path, device: torch.device | str
+) -> torch.nn.Module:
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    model.load_state_dict(checkpoint.get("model_state_dict", checkpoint), strict=True)
+    return model
+
+
 def load_checkpoint(
     checkpoint_path: str | Path, 
     device: torch.device, 

@@ -11,7 +11,7 @@ from dsec_det.dataset import DSECDet
 from dsec_det.visualize import render_object_detections_on_image 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from utils import build_model, select_device
+from utils import build_model, load_weights, select_device
 from dataset_loader import load_causal_events
 
 def create_video_writer(output_path, fps, width, height):
@@ -42,12 +42,8 @@ def generate_event_histogram(events, height=480, width=640):
 
 def load_yolo_model(weights_path, ch, device):
     model = YOLO("yolo26n.yaml", task="detect")
-    model.model = build_model(ch)
-    
-    checkpoint = torch.load(weights_path, map_location=device, weights_only=True)
-    state_dict = checkpoint["model_state_dict"] if "model_state_dict" in checkpoint else checkpoint
-    model.model.load_state_dict(state_dict)
-    
+    model.model = load_weights(build_model(ch), weights_path, device)
+
     return model, ch
 
 if __name__ == '__main__':

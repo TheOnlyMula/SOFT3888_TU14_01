@@ -10,7 +10,7 @@ from dsec_det.label import CLASSES
 
 import log
 from dataset_loader import create_rgb_test_loader
-from utils import extract_trainable_model, select_device
+from utils import extract_trainable_model, load_weights, select_device
 
 # OpenCV draws in BGR.
 PREDICTION_COLOUR = (0, 0, 255)
@@ -32,9 +32,7 @@ def load_student_model(checkpoint_path, weights_path, device):
         weights_path=weights_path,
         device=device,
     )
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
-    # Handles both the {'model_state_dict': ...} wrapper and a bare state_dict.
-    model.load_state_dict(checkpoint.get("model_state_dict", checkpoint))
+    load_weights(model, checkpoint_path, device)
     model.eval()
     return model
 
