@@ -311,9 +311,19 @@ class PostTrainingEvaluationTests(unittest.TestCase):
         self.checkpoint.unlink()
         loader = make_loader(4)
         optimiser = torch.optim.SGD(self.model.parameters(), lr=0.1)
+        validated_weights = []
+        validation_losses = iter([1.0, 3.0])
+
+        def validate_and_record(val_loader, model, device, logger):
+            self.assertIs(val_loader, loader)
+            self.assertIs(device, self.device)
+            self.assertIs(logger, self.logger)
+            validated_weights.append(model.weight.detach().clone())
+            return val_results(next(validation_losses))
+
         with patch(
             "training.validate_model",
-            side_effect=[val_results(1.0), val_results(3.0)],
+            side_effect=validate_and_record,
         ):
             path = train_model(
                 loader,
@@ -328,18 +338,31 @@ class PostTrainingEvaluationTests(unittest.TestCase):
             )
 
         saved = torch.load(path, weights_only=True)
-        self.assertAlmostEqual(
-            saved["model_state_dict"]["weight"].item(), 1.4, places=5
+        self.assertEqual(saved["epoch"], 1)
+        torch.testing.assert_close(
+            saved["model_state_dict"]["weight"], validated_weights[0]
         )
-        self.assertAlmostEqual(self.model.weight.item(), 0.8, places=5)
+        self.assertNotEqual(
+            saved["model_state_dict"]["weight"].item(), self.model.weight.item()
+        )
 
     def test_training_improvement_overwrites_previous_best(self):
         self.checkpoint.unlink()
         loader = make_loader(4)
         optimiser = torch.optim.SGD(self.model.parameters(), lr=0.1)
+        validated_weights = []
+        validation_losses = iter([3.0, 1.0])
+
+        def validate_and_record(val_loader, model, device, logger):
+            self.assertIs(val_loader, loader)
+            self.assertIs(device, self.device)
+            self.assertIs(logger, self.logger)
+            validated_weights.append(model.weight.detach().clone())
+            return val_results(next(validation_losses))
+
         with patch(
             "training.validate_model",
-            side_effect=[val_results(3.0), val_results(1.0)],
+            side_effect=validate_and_record,
         ):
             train_model(
                 loader,
@@ -354,8 +377,9 @@ class PostTrainingEvaluationTests(unittest.TestCase):
             )
 
         saved = torch.load(self.checkpoint, weights_only=True)
-        self.assertAlmostEqual(
-            saved["model_state_dict"]["weight"].item(), 0.8, places=5
+        self.assertEqual(saved["epoch"], 2)
+        torch.testing.assert_close(
+            saved["model_state_dict"]["weight"], validated_weights[1]
         )
 
     def test_invalid_validation_loss_preserves_old_checkpoint(self):

@@ -80,7 +80,7 @@ def create_optimiser(model: torch.nn.Module) -> torch.optim.Optimizer:
     #)
     return torch.optim.AdamW(
         (parameter for parameter in model.parameters() if parameter.requires_grad),
-        lr=3e-4,
+        lr=1e-4,
         weight_decay=0.0005,
     )
     

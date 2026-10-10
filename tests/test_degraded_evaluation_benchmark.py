@@ -1,5 +1,6 @@
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 import random
 import numpy as np
@@ -8,6 +9,27 @@ from evaluate import evaluate_degraded_benchmark, format_benchmark_table
 from torch.utils.data import DataLoader, TensorDataset
 
 from dataset_loader import DSECFusionDataset, degradation_seed, rgb_loader_fingerprint
+
+
+class _PicklableDSECDet:
+    def __init__(self):
+        self.directory = SimpleNamespace(
+            root=SimpleNamespace(name="zurich_city_00_a")
+        )
+
+    def __len__(self):
+        return 8
+
+    def get_image(self, idx):
+        return np.full((16, 16, 3), 80 + idx, dtype=np.uint8)
+
+    def get_tracks(self, idx):
+        if not 0 <= idx < len(self):
+            raise IndexError(idx)
+        return []
+
+    def rel_index(self, idx):
+        return idx, None, self.directory
 
 
 class DegradedEvaluationBenchmarkTests(unittest.TestCase):
@@ -684,27 +706,7 @@ class DegradedEvaluationBenchmarkTests(unittest.TestCase):
 
     @patch("dataset_loader.DSECDet")
     def test_degraded_fingerprint_is_independent_of_worker_count(self, dataset_class):
-        base = dataset_class.return_value
-
-        base.__len__.return_value = 8
-
-        def get_image(idx):
-            return np.full(
-                (16, 16, 3),
-                80 + idx,
-                dtype=np.uint8,
-            )
-
-        base.get_image.side_effect = get_image
-        base.get_tracks.return_value = []
-
-        directory = MagicMock()
-        directory.name = "zurich_city_00_a"
-
-        def rel_index(idx):
-            return idx, None, directory
-
-        base.rel_index.side_effect = rel_index
+        dataset_class.return_value = _PicklableDSECDet()
 
         dataset_zero_workers = DSECFusionDataset(
             Path("fake"),
@@ -742,6 +744,7 @@ class DegradedEvaluationBenchmarkTests(unittest.TestCase):
             rgb_loader_fingerprint(loader_zero_workers),
             rgb_loader_fingerprint(loader_four_workers),
         )
+        self.assertEqual(dataset_class.call_count, 2)
 
     @patch("dataset_loader.DSECDet")
     def test_degraded_fingerprint_is_independent_of_prior_random_use(self, dataset_class):

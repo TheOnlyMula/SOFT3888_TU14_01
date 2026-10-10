@@ -9,6 +9,8 @@ import torch
 from torch.utils.data import DataLoader
 from ultralytics.models.yolo.detect import DetectionValidator
 from ultralytics.utils.metrics import DetMetrics
+from ultralytics.utils import ops
+from ultralytics.utils.plotting import plot_images
 from dataset_loader import (
     create_test_loader,
     resolve_degradation_strength,
@@ -35,6 +37,44 @@ def _prepare_yolo_batch(imgs, targets, device):
 
 class DsecDetectionValidator(DetectionValidator):
     """Ultralytics detection validator"""
+
+    def plot_val_samples(self, batch: dict, ni: int) -> None:
+        plot_images(
+            labels=batch,
+            paths=batch["im_file"],
+            fname=self.save_dir / f"val_batch{ni}_labels.jpg",
+            names=self.names,
+            on_plot=self.on_plot,
+            threaded=False,
+        )
+
+    def plot_predictions(
+        self,
+        batch: dict,
+        preds: list[dict[str, torch.Tensor]],
+        ni: int,
+        max_det: int | None = None,
+    ) -> None:
+        if not preds:
+            return
+        for i, pred in enumerate(preds):
+            pred["batch_idx"] = torch.ones_like(pred["conf"]) * i
+        keys = preds[0].keys()
+        max_det = max_det or self.args.max_det
+        batched_preds = {
+            key: torch.cat([pred[key][:max_det] for pred in preds], dim=0)
+            for key in keys
+        }
+        batched_preds["bboxes"] = ops.xyxy2xywh(batched_preds["bboxes"])
+        plot_images(
+            images=batch["img"],
+            labels=batched_preds,
+            paths=batch["im_file"],
+            fname=self.save_dir / f"val_batch{ni}_pred.jpg",
+            names=self.names,
+            on_plot=self.on_plot,
+            threaded=False,
+        )
 
     def init_metrics(self, model: torch.nn.Module) -> None:
         super().init_metrics(model)
