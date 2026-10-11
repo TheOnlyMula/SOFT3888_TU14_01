@@ -34,6 +34,18 @@ class DarkeningTests(unittest.TestCase):
                 result = darken(self.image, level, seed=17)
                 self.assertEqual(result["image"].shape, self.image.shape)
 
+    def test_invalid_strength_raises_value_error(self):
+        with self.assertRaises(ValueError):
+            darken(self.image, "invalid_strength", seed=17)\
+
+    def test_negative_strength_raises_value_error(self):
+        with self.assertRaises(ValueError):
+            darken(self.image, -0.1, seed=17)
+
+    def test_strength_greater_than_one_raises_value_error(self):
+        with self.assertRaises(ValueError):
+            darken(self.image, 1.1, seed=17)
+
     def test_darkened_output_is_rgb_uint8_in_valid_range(self):
         result = darken(self.image, "strong", seed=17)
         darkened = result["image"]
@@ -87,6 +99,13 @@ class DarkeningTests(unittest.TestCase):
         self.assertEqual(first["image"].shape, self.image.shape)
         self.assertEqual(first["image"].dtype, np.uint8)
         np.testing.assert_array_equal(first["image"], second["image"])
+
+    def test_rgb_values_are_clipped_to_0_255(self):
+        result = darken(self.image, "strong", seed=17)
+        darkened = result["image"]
+
+        self.assertTrue(np.all(darkened >= 0))
+        self.assertTrue(np.all(darkened <= 255))
 
     def test_input_image_is_not_modified(self):
         original = self.image.copy()
