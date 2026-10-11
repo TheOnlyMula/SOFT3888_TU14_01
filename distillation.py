@@ -24,6 +24,11 @@ DISTILL_LEVEL = 0
 
 MASK_ENLARGEMENT = 1.2
 
+DISTILL_MODES = ("unweighted", "object")
+
+# Keeps the object-aware loss finite (zero) for images without labelled objects.
+MASK_EPS = 1e-6
+
 
 def load_teacher(
     checkpoint_path: Path,
@@ -87,9 +92,29 @@ def feature_distillation_loss(student_preds, teacher_preds, level: int = DISTILL
     """Smooth L1 distance between the student's and teacher's features at one neck level.
 
     The teacher side is detached, so no gradient reaches the frozen teacher. Every spatial
-    location counts equally as the object mask and event-quality weight come later.
+    location counts equally: this is the unweighted baseline.
     """
-    student_feature = head_outputs(student_preds)[DISTILL_TARGET]["feats"][level]
-    teacher_feature = head_outputs(teacher_preds)[DISTILL_TARGET]["feats"][level]
-
+    student_feature, teacher_feature = distilled_features(student_preds, teacher_preds, level)
     return F.smooth_l1_loss(student_feature, teacher_feature.detach())
+
+
+def object_distillation_loss(
+    student_preds, teacher_preds, mask: torch.Tensor, level: int = DISTILL_LEVEL
+) -> torch.Tensor:
+    """Distillation restricted to the object mask.
+
+    The distance at each feature cell is the smooth L1 averaged over channels, so with an all-ones
+    mask the batch mean equals feature_distillation_loss and one lambda_distill serves both modes.
+    Each image's loss averages over its masked cells; an image without objects contributes 0.
+    """
+    student_feature, teacher_feature = distilled_features(student_preds, teacher_preds, level)
+    distance = F.smooth_l1_loss(student_feature, teacher_feature.detach(), reduction="none").mean(dim=1)
+    return (mask * distance).sum(dim=(1, 2)) / (mask.sum(dim=(1, 2)) + MASK_EPS)
+
+
+def distilled_features(student_preds, teacher_preds, level: int = DISTILL_LEVEL):
+    """The student's and teacher's neck features at the distilled level."""
+    return (
+        head_outputs(student_preds)[DISTILL_TARGET]["feats"][level],
+        head_outputs(teacher_preds)[DISTILL_TARGET]["feats"][level],
+    )

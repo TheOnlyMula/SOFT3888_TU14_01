@@ -8,6 +8,7 @@ import torch
 import training
 from distillation import (
     MASK_ENLARGEMENT,
+    object_distillation_loss,
     object_region_mask,
     DISTILL_LEVEL,
     DISTILL_TARGET,
@@ -211,6 +212,130 @@ class ObjectRegionMaskTests(unittest.TestCase):
             cwd=root, capture_output=True, text=True, check=True,
         )
         self.assertEqual(result.stdout.strip().splitlines()[-1], "False")
+
+
+def feature_preds(features):
+    """Wrap one feature map the way head_outputs exposes the distilled level."""
+    return {DISTILL_TARGET: {"feats": [features] if DISTILL_LEVEL == 0 else None}}
+
+
+class ObjectDistillationLossTests(unittest.TestCase):
+    def setUp(self):
+        generator = torch.Generator().manual_seed(0)
+        self.student = torch.randn(2, 4, 6, 8, generator=generator, requires_grad=True)
+        self.teacher = torch.randn(2, 4, 6, 8, generator=generator, requires_grad=True)
+
+    def loss(self, mask):
+        return object_distillation_loss(feature_preds(self.student), feature_preds(self.teacher), mask)
+
+    def test_all_ones_mask_equals_the_unweighted_baseline(self):
+        per_image = self.loss(torch.ones(2, 6, 8))
+        baseline = feature_distillation_loss(feature_preds(self.student), feature_preds(self.teacher))
+        self.assertEqual(per_image.shape, (2,))
+        torch.testing.assert_close(per_image.mean(), baseline, rtol=1e-5, atol=0)
+
+    def test_partial_mask_averages_the_distance_over_masked_cells(self):
+        mask = torch.zeros(2, 6, 8)
+        mask[0, 1:3, 2:5] = 1
+        mask[1, 4, 7] = 1
+        distance = torch.nn.functional.smooth_l1_loss(self.student, self.teacher, reduction="none").mean(1)
+        expected = torch.stack([distance[0, 1:3, 2:5].mean(), distance[1, 4, 7]])
+        torch.testing.assert_close(self.loss(mask), expected, rtol=1e-5, atol=0)
+
+    def test_image_without_objects_contributes_zero(self):
+        mask = torch.zeros(2, 6, 8)
+        mask[1, 2, 3] = 1
+        per_image = self.loss(mask)
+        self.assertEqual(per_image[0].item(), 0.0)
+        self.assertTrue(torch.isfinite(per_image).all())
+
+    def test_gradient_reaches_only_masked_cells_and_never_the_teacher(self):
+        mask = torch.zeros(2, 6, 8)
+        mask[0, 1:3, 2:5] = 1
+        self.loss(mask).mean().backward()
+        cell_grad = self.student.grad.abs().sum(dim=1)  # summed over channels: 2 x 6 x 8
+        self.assertTrue((cell_grad[mask == 1] > 0).all())
+        self.assertTrue((cell_grad[mask == 0] == 0).all())
+        self.assertIsNone(self.teacher.grad)
+
+
+class DistillModeOptionTests(unittest.TestCase):
+    def parse(self, *extra):
+        with patch("sys.argv", ["train", "--dataset-path", "fake", *extra]):
+            return training.parse_args("test")
+
+    def test_unweighted_is_the_default_and_object_is_accepted(self):
+        self.assertEqual(self.parse().distill_mode, "unweighted")
+        self.assertEqual(
+            self.parse("--teacher-checkpoint", "t.pt", "--distill-mode", "object").distill_mode, "object"
+        )
+
+    def test_object_mode_without_a_teacher_or_an_unknown_mode_is_rejected(self):
+        import contextlib
+        import io
+
+        for extra in (("--distill-mode", "object"), ("--teacher-checkpoint", "t.pt", "--distill-mode", "other")):
+            with self.subTest(extra=extra), contextlib.redirect_stderr(io.StringIO()),                     self.assertRaises(SystemExit):
+                self.parse(*extra)
+
+    def test_main_records_the_mode_and_mask_factor_and_trains_with_them(self):
+        loader = MagicMock()
+        train = MagicMock(return_value=Path("best.pt"))
+        with tempfile.TemporaryDirectory() as directory, patch.multiple(
+            training,
+            select_device=MagicMock(return_value=torch.device("cpu")),
+            create_dataloaders=MagicMock(return_value=(loader, loader)),
+            extract_trainable_model=MagicMock(),
+            load_teacher=MagicMock(),
+            create_optimiser=MagicMock(),
+            train_model=train,
+        ), patch.object(training.log, "create_log_directory", return_value=Path(directory)),                 patch.object(training.log, "create_logger", return_value=MagicMock()),                 patch.object(training.log, "log_command"),                 patch.object(training.log, "log_model_config") as log_config,                 patch("sys.argv", ["train", "--dataset-path", "fake", "--skip-test",
+                                   "--teacher-checkpoint", "t.pt", "--distill-mode", "object"]):
+            training.main(role="distill", rgb_only=True)
+        config = log_config.call_args.args[0]
+        self.assertEqual(config["Distill Mode"], "object")
+        self.assertEqual(config["Object Mask Enlargement"], MASK_ENLARGEMENT)
+        self.assertEqual(train.call_args.kwargs["distill_mode"], "object")
+
+
+class ObjectDistillationTrainingTests(unittest.TestCase):
+    def test_object_mode_trains_a_real_student_with_the_masked_loss(self):
+        from torch.utils.data import DataLoader
+
+        from dataset_loader import yolo_collate_fn
+        from test_post_training_evaluation import val_results
+        from utils import extract_trainable_model
+
+        torch.manual_seed(0)
+        samples = [
+            (torch.rand(5, 64, 64), torch.tensor([[2.0, 0.4, 0.5, 0.3, 0.4]])),
+            (torch.rand(5, 64, 64), torch.zeros(0, 5)),  # an image without objects
+        ] * 2
+        loader = DataLoader(samples, batch_size=2, collate_fn=yolo_collate_fn)
+        student = extract_trainable_model(ch=3, weights_path=None, device="cpu")
+        teacher = build_model(5).eval().requires_grad_(False)
+        teacher_before = {k: v.clone() for k, v in teacher.state_dict().items()}
+        student_before = {k: v.clone() for k, v in student.state_dict().items()}
+
+        with tempfile.TemporaryDirectory() as directory,                 patch("training.validate_model", return_value=val_results(1.0, map50_95=0.1)),                 patch("training.object_distillation_loss", wraps=training.object_distillation_loss) as masked,                 patch("training.feature_distillation_loss", wraps=training.feature_distillation_loss) as unweighted:
+            training.train_model(
+                loader, loader, student, torch.optim.SGD(student.parameters(), lr=0.01), torch.device("cpu"),
+                MagicMock(), total_epochs=1, checkpoint_path=Path(directory) / "best.pt",
+                latest_path=Path(directory) / "latest.pt", teacher=teacher, lambda_distill=1.0,
+                distill_mode="object", nominal_batch_size=2, warmup_epochs=0,
+            )
+            saved = torch.load(Path(directory) / "best.pt", weights_only=True)
+
+        self.assertEqual(masked.call_count, 2)
+        unweighted.assert_not_called()
+        mask = masked.call_args.args[2]
+        self.assertEqual(mask.shape, (2, 8, 8))  # P3 for 64 x 64 images
+        self.assertGreater(mask[0].sum(), 0)
+        self.assertEqual(mask[1].sum(), 0)
+        self.assertTrue(all(torch.equal(teacher_before[k], v) for k, v in teacher.state_dict().items()))
+        self.assertFalse(all(torch.equal(student_before[k], v) for k, v in student.state_dict().items()))
+        # The checkpoint holds only the student: its weights have the student's 3-channel input
+        self.assertEqual(saved["model_state_dict"]["model.0.conv.weight"].shape[1], 3)
 
 
 if __name__ == "__main__":

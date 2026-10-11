@@ -75,13 +75,18 @@ The shared training pipeline used by both models. It:
 
 ### train_distilled_student.py
 
-Trains the RGB student with unweighted feature distillation from a frozen RGB + event teacher (`distillation.py`). Training batches carry RGB + event channels: the teacher sees all of them, the student only the RGB ones. Validation and test stay RGB-only, so student results never depend on event data.
+Trains the RGB student with feature distillation from a frozen RGB + event teacher (`distillation.py`). Training batches carry RGB + event channels: the teacher sees all of them, the student only the RGB ones. Validation and test stay RGB-only, so student results never depend on event data.
 
 ```bash
-python train_distilled_student.py   --dataset-path dataset   --epochs 50   --teacher-checkpoint runs/teacher/exp_xxx/best_teacher_yolo.pt   --lambda-distill 1.0
+python train_distilled_student.py   --dataset-path dataset   --epochs 50   --teacher-checkpoint runs/teacher/exp_xxx/best_teacher_yolo.pt   --lambda-distill 1.0   --distill-mode object
 ```
 
-The distillation loss is the mean smooth L1 distance between the student's and the frozen teacher's one-to-one neck features, applied at every spatial location (no object mask and no event-quality weight yet). Each epoch logs `distill_loss` and its weighted contribution to the total loss.
+The distillation loss is the smooth L1 distance between the student's and the frozen teacher's one-to-many P3 neck features (stride 8). Student and teacher share an architecture, so the features match without a projection layer. `--distill-mode` chooses where it is applied:
+
+- `unweighted` (default, the baseline): every spatial location counts equally.
+- `object`: only the labelled objects count (proposal eq. 2). Each image's boxes, after augmentation, are enlarged by `MASK_ENLARGEMENT` (1.2) about their centres and marked on the feature grid; the distance is averaged over those cells. Images without objects add no distillation loss. With a mask covering everything, this equals the unweighted loss, so one `--lambda-distill` serves both modes.
+
+The mask is built in the training step only and is never part of evaluation or inference. Each epoch logs `distill_loss`, the mode and the weighted contribution to the total loss; `config.yaml` records the mode and the mask enlargement.
 
 ### train_rgb_student.py and train_teacher.py
 
