@@ -7,6 +7,8 @@ import torch
 
 import training
 from distillation import (
+    MASK_ENLARGEMENT,
+    object_region_mask,
     DISTILL_LEVEL,
     DISTILL_TARGET,
     feature_distillation_loss,
@@ -133,6 +135,82 @@ class DistillationSeedTests(unittest.TestCase):
         baseline = self.student_init_draw([], role="student")
         distilled = self.student_init_draw(["--teacher-checkpoint", "teacher.pt"], role="distill")
         self.assertTrue(torch.equal(baseline, distilled))
+
+
+def mask_for(boxes, batch_idx=None, batch_size=1, feature_size=(10, 10), enlarge=1.0):
+    bboxes = torch.tensor(boxes, dtype=torch.float32).reshape(-1, 4)
+    if batch_idx is None:
+        batch_idx = [0] * len(bboxes)
+    return object_region_mask(
+        torch.tensor(batch_idx, dtype=torch.float32), bboxes, batch_size, feature_size, enlarge
+    )
+
+
+def marked_cells(mask):
+    return {tuple(cell) for cell in torch.nonzero(mask).tolist()}
+
+
+class ObjectRegionMaskTests(unittest.TestCase):
+    def test_box_marks_the_cells_it_overlaps(self):
+        # x 0.25-0.45 and y 0.45-0.65 on a 10 x 10 grid: columns 2-4, rows 4-6
+        mask = mask_for([[0.35, 0.55, 0.2, 0.2]])
+        expected = {(0, row, col) for row in (4, 5, 6) for col in (2, 3, 4)}
+        self.assertEqual(marked_cells(mask), expected)
+        self.assertEqual(mask.dtype, torch.float32)
+        self.assertEqual(set(mask.unique().tolist()), {0.0, 1.0})
+
+    def test_edges_that_only_touch_a_cell_do_not_mark_it(self):
+        # x 0.2-0.4 is exactly columns 2 and 3; columns 1 and 4 only touch the box edges
+        mask = mask_for([[0.3, 0.3, 0.2, 0.2]])
+        self.assertEqual(marked_cells(mask), {(0, r, c) for r in (2, 3) for c in (2, 3)})
+
+    def test_boxes_are_enlarged_about_their_centre(self):
+        plain = mask_for([[0.3, 0.3, 0.2, 0.2]], enlarge=1.0)
+        doubled = mask_for([[0.3, 0.3, 0.2, 0.2]], enlarge=2.0)  # now x 0.1-0.5: columns 1-4
+        self.assertEqual(marked_cells(doubled), {(0, r, c) for r in range(1, 5) for c in range(1, 5)})
+        self.assertTrue(marked_cells(plain) < marked_cells(doubled))
+        self.assertEqual(MASK_ENLARGEMENT, 1.2)
+
+    def test_boxes_past_the_image_edge_are_clipped(self):
+        # x -0.1 to 0.2 clips to columns 0-1; a box wholly outside marks nothing
+        mask = mask_for([[0.05, 0.5, 0.3, 0.2], [1.5, 0.5, 0.2, 0.2]])
+        self.assertEqual(marked_cells(mask), {(0, r, c) for r in (4, 5) for c in (0, 1)})
+
+    def test_images_without_boxes_get_an_empty_mask(self):
+        mask = mask_for([[0.5, 0.5, 0.2, 0.2], [0.5, 0.5, 0.2, 0.2]], batch_idx=[0, 2], batch_size=3)
+        self.assertEqual(mask.shape, (3, 10, 10))
+        self.assertGreater(mask[0].sum(), 0)
+        self.assertEqual(mask[1].sum(), 0)
+        self.assertGreater(mask[2].sum(), 0)
+
+        no_boxes = mask_for([], batch_size=2)
+        self.assertEqual(no_boxes.shape, (2, 10, 10))
+        self.assertEqual(no_boxes.sum(), 0)
+
+    def test_each_box_only_marks_its_own_image(self):
+        mask = mask_for([[0.15, 0.15, 0.1, 0.1], [0.85, 0.85, 0.1, 0.1]], batch_idx=[1, 0], batch_size=2)
+        self.assertEqual(marked_cells(mask[1:]), {(0, 1, 1)})  # image 1 holds the top-left box
+        self.assertEqual(marked_cells(mask[:1]), {(0, 8, 8)})  # image 0 the bottom-right one
+
+    def test_non_square_grids_keep_height_and_width_apart(self):
+        # P3 for a 480 x 640 frame is 60 x 80; a wide, short box must stay wide
+        mask = mask_for([[0.5, 0.5, 0.5, 0.1]], feature_size=(60, 80))
+        rows = {r for _, r, _ in marked_cells(mask)}
+        cols = {c for _, _, c in marked_cells(mask)}
+        self.assertEqual(mask.shape, (1, 60, 80))
+        self.assertEqual((min(cols), max(cols)), (20, 59))
+        self.assertEqual((min(rows), max(rows)), (27, 32))
+
+    def test_evaluation_never_imports_the_training_only_mask(self):
+        import subprocess
+        import sys
+
+        root = Path(__file__).resolve().parents[1]
+        result = subprocess.run(
+            [sys.executable, "-c", "import evaluate, sys; print('distillation' in sys.modules)"],
+            cwd=root, capture_output=True, text=True, check=True,
+        )
+        self.assertEqual(result.stdout.strip().splitlines()[-1], "False")
 
 
 if __name__ == "__main__":
