@@ -11,11 +11,10 @@ from ultralytics.models.yolo.detect import DetectionValidator
 from ultralytics.utils.metrics import DetMetrics
 from dataset_loader import (
     create_test_loader,
-    resolve_degradation_strength,
     rgb_loader_fingerprint,
 )
-from overexposure import STRENGTH_LEVELS
-from utils import extract_trainable_model
+from overexposure import STRENGTH_LEVELS, resolve_strength
+from utils import extract_trainable_model, load_weights, select_device
 
 
 def _prepare_yolo_batch(imgs, targets, device):
@@ -248,13 +247,7 @@ def evaluate_test_model(
 
     model.to(device)
     try:
-        checkpoint = torch.load(
-            checkpoint_path,
-            map_location=device,
-            weights_only=True,
-        )
-        state_dict = checkpoint.get("model_state_dict", checkpoint)
-        model.load_state_dict(state_dict, strict=True)
+        load_weights(model, checkpoint_path, device)
     except Exception as exc:
         message = f"Could not load the best checkpoint: {checkpoint_path}"
         logger.error(message)
@@ -302,7 +295,7 @@ def evaluate_test_model(
 def degradation_strength_argument(value: str) -> float:
     """Accept a named level or a number on the command line."""
     try:
-        return resolve_degradation_strength(value if value in STRENGTH_LEVELS else float(value))
+        return resolve_strength(value if value in STRENGTH_LEVELS else float(value))
     except ValueError as exc:
         raise argparse.ArgumentTypeError(str(exc)) from exc
 
@@ -432,12 +425,30 @@ if __name__ == "__main__":
         help='Degradation strength: "mild", "strong", or a number in [0, 1].',
     )
     parser.add_argument("--evaluation-seed", type=int, default=0)
+    parser.add_argument(
+        "--benchmark-report", type=Path,
+        help="Save benchmark metrics and provenance as JSON at this path.",
+    )
+    parser.add_argument(
+        "--model-name",
+        help="Model label for a benchmark report, e.g. rgb_baseline or naive_distillation.",
+    )
+    parser.add_argument(
+        "--dataset-id",
+        help="Shared identifier for the exact DSEC image and annotation release.",
+    )
     args = parser.parse_args()
+    if args.benchmark_report and not args.benchmark:
+        parser.error("--benchmark-report requires --benchmark")
+    if args.benchmark_report and (not args.model_name or not args.dataset_id or not args.dataset_id.strip()):
+        parser.error("--benchmark-report requires --model-name and --dataset-id")
+    if args.benchmark_report and (args.model_name == "teacher") != (args.type == "teacher"):
+        parser.error("--model-name teacher must match --type teacher")
 
     log_directory = log.create_log_directory(args.type)
     logger = log.create_logger("evaluate", log_directory)
     log.log_command(sys.argv, log_directory)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = select_device()
 
     rgb_only = args.type == "student"
     model = extract_trainable_model(
@@ -470,6 +481,25 @@ if __name__ == "__main__":
                 condition,
                 result["fingerprint"],
             )
+        if args.benchmark_report:
+            from benchmark_reporting import build_report, save_json
+
+            report = build_report(
+                benchmark_results,
+                model_name=args.model_name,
+                model_type=args.type,
+                model=model,
+                checkpoint_path=args.weights,
+                dataset_path=args.dataset_path,
+                dataset_id=args.dataset_id.strip(),
+                degradation_strength=args.degradation_strength,
+                evaluation_seed=args.evaluation_seed,
+                max_samples=args.max_samples,
+                batch_size=args.batch_size,
+                num_workers=args.num_workers,
+            )
+            save_json(args.benchmark_report, report)
+            logger.info("Benchmark report saved to %s", args.benchmark_report)
 
     else:
         test_loader = create_test_loader(

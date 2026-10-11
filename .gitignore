@@ -8,7 +8,9 @@
 runs/
 *.log
 project_b_capstone_milestones.md
+*.pdf
 tools/results
+
 # Dataset
 DSEC*/
 dsec*/

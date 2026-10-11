@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import MagicMock, call, patch
 
 import torch
+import yaml
 from torch.utils.data import DataLoader, SequentialSampler
 
 from dataset_loader import yolo_collate_fn
@@ -51,7 +52,7 @@ class BatchLossModel(torch.nn.Module):
         }
 
 
-def val_results(loss):
+def val_results(loss, map50_95=0.0):
     return {
         "loss": loss,
         "box_loss": 0.0,
@@ -60,7 +61,7 @@ def val_results(loss):
         "precision": 0.0,
         "recall": 0.0,
         "map50": 0.0,
-        "map50_95": 0.0,
+        "map50_95": map50_95,
         "agnostic_map50": 0.0,
     }
 
@@ -307,14 +308,22 @@ class PostTrainingEvaluationTests(unittest.TestCase):
         self.assertTrue((save_dir / "confusion_matrix.png").is_file())
         self.assertTrue((save_dir / "val_batch0_pred.jpg").is_file())
 
-    def test_training_saves_best_validation_epoch_instead_of_last_epoch(self):
+    def test_training_saves_highest_map_epoch_instead_of_last_epoch(self):
         self.checkpoint.unlink()
         loader = make_loader(4)
         optimiser = torch.optim.SGD(self.model.parameters(), lr=0.1)
-        with patch(
-            "training.validate_model",
-            side_effect=[val_results(1.0), val_results(3.0)],
-        ):
+        validated_weights = []
+        # Epoch 1 has the higher loss but the higher mAP50-95, so selection must follow mAP
+        validation_results = iter([val_results(3.0, map50_95=0.5), val_results(1.0, map50_95=0.2)])
+
+        def validate_and_record(val_loader, model, device, logger):
+            self.assertIs(val_loader, loader)
+            self.assertIs(device, self.device)
+            self.assertIs(logger, self.logger)
+            validated_weights.append(model.weight.detach().clone())
+            return next(validation_results)
+
+        with patch("training.validate_model", side_effect=validate_and_record):
             path = train_model(
                 loader,
                 loader,
@@ -327,20 +336,89 @@ class PostTrainingEvaluationTests(unittest.TestCase):
                 latest_path=self.latest,
             )
 
+        # model_state_dict holds EMA weights, so check the selected epoch rather than raw weights.
         saved = torch.load(path, weights_only=True)
-        self.assertAlmostEqual(
-            saved["model_state_dict"]["weight"].item(), 1.4, places=5
+        self.assertEqual(saved["epoch"], 1)
+        self.assertEqual(saved["val_metrics"]["map50_95"], 0.5)
+        # The saved weights are exactly the ones validated in the best epoch
+        torch.testing.assert_close(saved["model_state_dict"]["weight"], validated_weights[0])
+        # The in-memory model keeps training past the best epoch: it matches the latest checkpoint.
+        latest = torch.load(self.latest, weights_only=True)
+        self.assertEqual(latest["epoch"], 2)
+        torch.testing.assert_close(
+            latest["raw_model_state_dict"]["weight"], self.model.weight.detach()
         )
-        self.assertAlmostEqual(self.model.weight.item(), 0.8, places=5)
 
-    def test_training_improvement_overwrites_previous_best(self):
+    def _train_one_epoch_recording_steps(self, batches, **kwargs):
+        loader = make_loader(4 * batches)
+        step_lrs = []
+
+        class RecordingSGD(torch.optim.SGD):
+            def step(self, closure=None):
+                step_lrs.append(self.param_groups[0]["lr"])
+                return super().step(closure)
+
+        optimiser = RecordingSGD(self.model.parameters(), lr=0.1)
+        self.checkpoint.unlink()
+        with patch("training.validate_model", return_value=val_results(1.0, map50_95=0.5)):
+            train_model(
+                loader,
+                loader,
+                self.model,
+                optimiser,
+                self.device,
+                self.logger,
+                total_epochs=2,
+                checkpoint_path=self.checkpoint,
+                latest_path=self.latest,
+                **kwargs,
+            )
+        return step_lrs
+
+    def test_gradients_accumulate_to_the_nominal_batch_size(self):
+        # 2 epochs of 3 batches (4 images each) with a nominal batch of 8: like Ultralytics, a
+        # step happens every 2 batches and the leftover batch carries over into the next epoch.
+        step_lrs = self._train_one_epoch_recording_steps(
+            batches=3, nominal_batch_size=8, warmup_epochs=0
+        )
+        self.assertEqual(len(step_lrs), 3)
+
+    def test_learning_rate_warms_up_from_zero_then_follows_the_schedule(self):
+        step_lrs = self._train_one_epoch_recording_steps(
+            batches=4, nominal_batch_size=4, warmup_epochs=1
+        )
+        # Warmup ramps from 0 towards the first epoch's rate over the 4 warmup batches
+        for actual, expected in zip(step_lrs[:4], [0.0, 0.025, 0.05, 0.075]):
+            self.assertAlmostEqual(actual, expected, places=7)
+        # Then the linear schedule alone sets the rate for the second of 2 epochs
+        for actual in step_lrs[4:]:
+            self.assertAlmostEqual(actual, 0.1 * training.lr_factor(1, 2), places=7)
+        self.assertAlmostEqual(training.lr_factor(1, 2), 0.505)
+
+    def test_warmup_never_covers_the_final_epoch(self):
+        # A 3-epoch warmup in a 2-epoch run is cut to 1 epoch, as in Ultralytics
+        step_lrs = self._train_one_epoch_recording_steps(
+            batches=4, nominal_batch_size=4, warmup_epochs=3
+        )
+        self.assertAlmostEqual(step_lrs[3], 0.075, places=7)
+        self.assertAlmostEqual(step_lrs[4], 0.1 * training.lr_factor(1, 2), places=7)
+
+    def test_training_map_improvement_overwrites_previous_best(self):
         self.checkpoint.unlink()
         loader = make_loader(4)
         optimiser = torch.optim.SGD(self.model.parameters(), lr=0.1)
-        with patch(
-            "training.validate_model",
-            side_effect=[val_results(3.0), val_results(1.0)],
-        ):
+        validated_weights = []
+        # Epoch 2 has the higher loss but the higher mAP50-95, so it must replace epoch 1
+        validation_results = iter([val_results(1.0, map50_95=0.2), val_results(3.0, map50_95=0.5)])
+
+        def validate_and_record(val_loader, model, device, logger):
+            self.assertIs(val_loader, loader)
+            self.assertIs(device, self.device)
+            self.assertIs(logger, self.logger)
+            validated_weights.append(model.weight.detach().clone())
+            return next(validation_results)
+
+        with patch("training.validate_model", side_effect=validate_and_record):
             train_model(
                 loader,
                 loader,
@@ -354,9 +432,9 @@ class PostTrainingEvaluationTests(unittest.TestCase):
             )
 
         saved = torch.load(self.checkpoint, weights_only=True)
-        self.assertAlmostEqual(
-            saved["model_state_dict"]["weight"].item(), 0.8, places=5
-        )
+        self.assertEqual(saved["epoch"], 2)
+        self.assertEqual(saved["val_metrics"]["map50_95"], 0.5)
+        torch.testing.assert_close(saved["model_state_dict"]["weight"], validated_weights[1])
 
     def test_invalid_validation_loss_preserves_old_checkpoint(self):
         loader = make_loader(4)
@@ -384,7 +462,7 @@ class PostTrainingEvaluationTests(unittest.TestCase):
             2.0,
         )
 
-    def _run_main(self, *extra_args, role="student", rgb_only=True):
+    def _run_main(self, *extra_args, role="student", rgb_only=True, argv=None):
         events = []
         self.calls = {}
         loader = make_loader()
@@ -429,13 +507,13 @@ class PostTrainingEvaluationTests(unittest.TestCase):
             ),
             patch.object(
                 training.log, "create_log_directory", return_value=self.directory
-            ),
+            ) as self.create_log_directory,
             patch.object(training.log, "create_logger", return_value=logger),
-            patch.object(training.log, "log_command"),
+            patch.object(training.log, "log_command") as self.log_command,
             patch.object(training.log, "log_model_config"),
             patch(
                 "sys.argv",
-                ["train_rgb_student.py", "--dataset-path", "fake", *extra_args],
+                argv or ["train_rgb_student.py", "--dataset-path", "fake", *extra_args],
             ),
         ):
             training.main(role=role, rgb_only=rgb_only)
@@ -452,6 +530,85 @@ class PostTrainingEvaluationTests(unittest.TestCase):
 
     def test_main_skip_test_does_not_open_test_data(self):
         self.assertEqual(self._run_main("--skip-test"), ["dataloaders", "train"])
+
+    def _save_original_command(self, *args, script="train_rgb_student.py"):
+        (self.directory / "run_args.yaml").write_text(yaml.safe_dump([script, *args]))
+        (self.directory / "latest_student_yolo.pt").touch()
+
+    def test_resume_continues_in_the_original_folder_with_its_settings(self):
+        self._save_original_command("--dataset-path", "fake", "--epochs", "7", "--batch-size", "2")
+        self._run_main(
+            argv=["train_rgb_student.py", "--resume", str(self.directory), "--num-workers", "3"]
+        )
+
+        self.create_log_directory.assert_not_called()
+        self.log_command.assert_not_called()  # the original command files are kept
+        self.assertEqual(self.calls["train"]["latest_path"], self.directory / "latest_student_yolo.pt")
+        self.assertEqual(self.calls["train"]["total_epochs"], 7)
+        self.assertEqual(self.calls["model"]["epochs"], 7)
+        self.assertEqual(self.calls["dataloaders"]["batch_size"], 2)
+        self.assertEqual(self.calls["dataloaders"]["num_workers"], 3)  # allowed override
+
+    def test_resume_without_a_latest_checkpoint_fails(self):
+        self._save_original_command("--dataset-path", "fake")
+        (self.directory / "latest_student_yolo.pt").unlink()
+        with self.assertRaisesRegex(FileNotFoundError, "no latest checkpoint"):
+            self._run_main(argv=["train_rgb_student.py", "--resume", str(self.directory)])
+
+    def test_resume_refuses_to_change_training_settings(self):
+        self._save_original_command("--dataset-path", "fake", "--epochs", "7")
+        argv = ["train_rgb_student.py", "--resume", str(self.directory), "--epochs", "9"]
+        with patch("sys.argv", argv), self.assertRaises(SystemExit):
+            training.parse_args("test")
+
+    def test_resume_refuses_a_run_from_another_script(self):
+        self._save_original_command("--dataset-path", "fake", script="train_distilled_student.py")
+        argv = ["train_rgb_student.py", "--resume", str(self.directory)]
+        with patch("sys.argv", argv), self.assertRaises(SystemExit):
+            training.parse_args("test")
+
+    def test_resume_reads_older_runs_from_run_command_txt(self):
+        (self.directory / "run_command.txt").write_text(
+            "train_rgb_student.py --dataset-path dataset --epochs 100 --batch-size 6 --num-workers 4"
+        )
+        with patch("sys.argv", ["train_rgb_student.py", "--resume", str(self.directory)]):
+            args = training.parse_args("test")
+        self.assertEqual(args.dataset_path, Path("dataset"))
+        self.assertEqual((args.epochs, args.batch_size, args.num_workers), (100, 6, 4))
+        self.assertEqual(args.resume, self.directory)
+
+    def test_new_runs_need_a_dataset_path(self):
+        with patch("sys.argv", ["train_rgb_student.py"]), self.assertRaises(SystemExit):
+            training.parse_args("test")
+
+    def test_interrupted_training_resumes_after_the_last_saved_epoch(self):
+        self.checkpoint.unlink()
+        loader = make_loader(4)
+        settings = dict(total_epochs=3, checkpoint_path=self.checkpoint, latest_path=self.latest)
+
+        # Epoch 1 finishes and is saved; the run dies while validating epoch 2
+        optimiser = torch.optim.SGD(self.model.parameters(), lr=0.1)
+        with patch(
+            "training.validate_model",
+            side_effect=[val_results(1.0, map50_95=0.5), RuntimeError("power cut")],
+        ):
+            with self.assertRaises(RuntimeError):
+                train_model(loader, loader, self.model, optimiser, self.device, self.logger, **settings)
+        self.assertEqual(torch.load(self.latest, weights_only=True)["epoch"], 1)
+
+        # A fresh process resumes: only epochs 2 and 3 run, and the best is still chosen by mAP
+        model = BatchLossModel()
+        optimiser = torch.optim.SGD(model.parameters(), lr=0.1)
+        with patch(
+            "training.validate_model",
+            side_effect=[val_results(1.0, map50_95=0.4), val_results(1.0, map50_95=0.6)],
+        ) as validate:
+            train_model(loader, loader, model, optimiser, self.device, self.logger, **settings)
+
+        self.assertEqual(validate.call_count, 2)
+        self.assertEqual(torch.load(self.latest, weights_only=True)["epoch"], 3)
+        best = torch.load(self.checkpoint, weights_only=True)
+        self.assertEqual((best["epoch"], best["val_metrics"]["map50_95"]), (3, 0.6))
 
     def test_teacher_runs_the_same_pipeline_with_event_channels(self):
         student_events = self._run_main()

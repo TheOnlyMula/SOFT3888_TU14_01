@@ -11,6 +11,8 @@ SOFT3888_TU14_01/
 ├── README.md
 ├── dataset_loader.py
 ├── training.py
+├── distillation.py
+├── train_distilled_student.py
 ├── train_rgb_student.py
 ├── train_teacher.py
 ├── evaluate.py
@@ -42,9 +44,20 @@ This file defines the DSEC dataset access layer. It creates a custom dataset tha
 - optionally reads event tensors from event files,
 - converts event polarity information into a 2-channel histogram,
 - maps labels into YOLO-style bounding box targets,
-- supports both RGB-only and fused RGB + event training paths.
+- supports both RGB-only and fused RGB + event training paths,
+- augments the training split when `augment=True` (see below).
 
 Images and labels come from the DSEC detector utilities. For real-time detection, each RGB image is paired only with events from the 50 ms _before_ its timestamp (`load_causal_events` in `dataset_loader.py`), so the model never sees events that happen after the image. DSECDet's own `sync` windows are not used for events: `sync="back"` returns the 50 ms after the image, and `sync="front"` pairs the image with the previous frame's labels. The first frame of each sequence has no preceding events, so its event channels are empty.
+
+### augment.py
+
+Training-time augmentation, used by every model so student comparisons stay matched. One random draw moves the RGB pixels, the event pixels and the boxes together, so events stay aligned with the RGB the student sees:
+
+- horizontal flip (probability 0.5),
+- zoom of 0.5-1.5x about the centre and a shift of up to 10% of the width and height,
+- hue shift and saturation jitter on the RGB channels only (hue moves by the same amount for every colour, as in Ultralytics 8.4). Brightness is left alone because brightness shifts belong to the degradation-augmentation baseline.
+
+Pixels uncovered by the zoom or shift are grey (114) in RGB and 0 in the event channels, since any other event value would invent events. Boxes that end up mostly outside the image, or cut into slivers more than 100 times longer than wide, are dropped. Every sample makes the same random draws with or without events, so for the same `--seed` the RGB student and the distilled student see identical augmented RGB.
 
 ### training.py
 
@@ -52,10 +65,23 @@ The shared training pipeline used by both models. It:
 
 - builds a DSEC RGB dataloader for train/validation splits,
 - initialises a YOLO model from the pretrained `yolo26n.pt` checkpoint,
-- trains with a YOLO-style loss,
-- logs training metrics,
+- trains with a YOLO-style loss on augmented frames (`--no-augment` turns this off),
+- accumulates gradients to about 64 images per optimiser step, as Ultralytics does,
+- follows Ultralytics' YOLO26 optimisation recipe: MuSGD (lr 0.01, Nesterov momentum, 3x learning rate on the detection head's classification layers, weight decay on conv and linear weights only), the summed rather than averaged loss, a 3-epoch warmup of learning rate, momentum and accumulation, then a linear decay to 1%,
+- runs with deterministic GPU kernels (as Ultralytics does), which costs some speed,
+- logs training metrics, and after every epoch adds them to the run's `results.csv` and redraws the training curves in `results.png` (Ultralytics' `plot_results`),
 - saves the best validation checkpoint,
 - optionally runs a final test evaluation.
+
+### train_distilled_student.py
+
+Trains the RGB student with unweighted feature distillation from a frozen RGB + event teacher (`distillation.py`). Training batches carry RGB + event channels: the teacher sees all of them, the student only the RGB ones. Validation and test stay RGB-only, so student results never depend on event data.
+
+```bash
+python train_distilled_student.py   --dataset-path dataset   --epochs 50   --teacher-checkpoint runs/teacher/exp_xxx/best_teacher_yolo.pt   --lambda-distill 1.0
+```
+
+The distillation loss is the mean smooth L1 distance between the student's and the frozen teacher's one-to-one neck features, applied at every spatial location (no object mask and no event-quality weight yet). Each epoch logs `distill_loss` and its weighted contribution to the total loss.
 
 ### train_rgb_student.py and train_teacher.py
 
@@ -64,7 +90,7 @@ Thin entry points into `training.py`. The two models are trained identically; th
 - `train_rgb_student.py`: 3 channels (RGB).
 - `train_teacher.py`: 5 channels (RGB + 2-channel event histogram).
 
-Both accept the same arguments (`--dataset-path`, `--epochs`, `--batch-size`, `--num-workers`, `--max-samples`, `--skip-test`, `--console-level`).
+Both accept the same arguments (`--dataset-path`, `--epochs`, `--batch-size`, `--num-workers`, `--max-samples`, `--skip-test`, `--seed`, `--no-augment`, `--resume`, `--console-level`). Use the same `--seed` for every student you compare; it fixes model initialisation, the shuffle order and the augmentation draws.
 
 ### evaluate.py
 
@@ -183,12 +209,55 @@ python train_rgb_student.py \
 The script does the following:
 
 - loads the DSEC RGB-only train and validation sets,
-- shuffles the training data,
+- shuffles the training data with a seeded generator (`--seed`, default 0),
+- augments each training frame (flip, scale, shift, hue/saturation) unless `--no-augment` is given,
 - collates labels into a YOLO-compatible target structure,
-- clips gradients to avoid exploding updates,
+- accumulates gradients to about 64 images per step and clips them to avoid exploding updates,
 - validates after each epoch,
-- saves the model with the lowest validation loss,
+- saves the model with the highest validation mAP50-95,
 - runs a final test evaluation unless `--skip-test` is provided.
+
+Enable a random degradation mix for RGB-only student training:
+
+```bash
+python train_rgb_student.py \
+  --dataset-path "/path/to/DSEC_ROOT" \
+  --epochs 10 \
+  --degradation-augmentation \
+  --degradation-shares 0.5 0.25 0.25 \
+  --dark-strength-range 0.35 1.0 \
+  --overexposed-strength-range 0.35 1.0 \
+  --augmentation-seed 42
+```
+
+Augmentation is off by default. Shares are probabilities in clean, darkened,
+over-exposed order; they must be non-negative and sum to 1. The default is
+50%/25%/25%. Each training image independently draws a fresh condition on every
+load, so batch and epoch proportions fluctuate. Augmentation affects only the
+training loader: validation (including checkpoint selection) and final test
+evaluation use clean RGB images, identical to those used without augmentation.
+To evaluate degraded images, explicitly run the [degraded evaluation benchmark](#degraded-evaluation-benchmark).
+For each degraded image, strength is drawn uniformly
+from the selected condition's range. Both ranges default to the benchmark's
+`mild` (0.35) through `strong` (1.0) levels. Bounds must satisfy
+`0 <= MIN <= MAX <= 1`; equal bounds give a fixed strength. Clean images do not
+draw a strength. Darkening uses `darkening.darken`, mapped onto this strength
+scale exactly as in the benchmark (see below).
+These options are for the RGB-only student without a teacher checkpoint and do
+not change benchmark settings.
+
+`--augmentation-seed` (default `0`, non-negative integer) controls a dedicated
+random stream for condition selection, strength and darkening noise. It is
+independent of the benchmark's `--evaluation-seed` and global NumPy/PyTorch RNGs.
+Each loader worker has its own stream, which advances across epochs. The same
+seed reproduces the augmentation sequence for the same sample order, batch size
+and worker count; this seed does not control training shuffle or model randomness.
+Changing the worker count can change the augmentation sequence. Augmentation RNG
+state is not checkpointed, so restarting a loader restarts its streams.
+
+Every run's `runs/student/exp_XXX/config.yaml` records `Training Augmentation`:
+the enabled flag, named condition shares, both strength ranges and the seed,
+including default values when options are omitted.
 
 ### Teacher RGB + event training
 
@@ -217,7 +286,7 @@ During training, validation is performed using a model in evaluation mode and `t
 - average validation classification loss,
 - average validation L1 loss.
 
-The best checkpoint is selected using the lowest validation batch loss.
+The best checkpoint is selected using the highest validation mAP50-95. Validation loss is not used, because the YOLO26 loss shifts its weighting between the two detection heads every epoch, so loss values are not comparable across epochs.
 
 ### Test evaluation command
 
@@ -261,9 +330,44 @@ The benchmark reports mAP@0.5, mAP@0.5:0.95, recall, and the performance drop fr
 
 `--degradation-strength` accepts the named levels `mild` (0.35) and `strong` (1.0) defined in `overexposure.py`, or a number in [0, 1]. The same value is used for the darkened and over-exposed conditions, and over-exposure is applied by `overexposure.overexpose`.
 
+Darkening is applied by `darkening.darken`, which works on an illumination scale instead (1 = unchanged). The benchmark strength maps linearly onto it: `illumination = 1 - 0.8 * strength`, so strength 0 leaves images unchanged, `mild` (0.35) dims to 72% illumination and `strong` (1.0) dims to darkening's own `strong` level (20%). Each frame's illumination field and sensor noise come from its per-frame seed. The degradation-augmentation baseline uses the same mapping, so its training darkening matches this benchmark condition.
+
 The evaluation seed keeps benchmark inputs reproducible. Each condition also produces an RGB fingerprint, which can be compared between runs to confirm that the same input images were evaluated.
 
 For fair comparisons between models, use the same dataset split, degradation settings, evaluation seed, and benchmark configuration.
+
+### Export and compare benchmark results
+
+After the evaluation code is committed, run each checkpoint with the same dataset release, seed, strength, and sample limit. Add these options to the benchmark command above:
+
+```bash
+  --model-name rgb_baseline \
+  --dataset-id dsec-left-annotations-v1 \
+  --benchmark-report runs/benchmark_reports/rgb_baseline.json
+```
+
+Choose a `--dataset-id` that identifies the **actual image and annotation version** used by the team; the example is only a placeholder. Use a different report path and one of `rgb_baseline`, `rgb_augmented`, `naive_distillation`, `proposed_event`, or `teacher` for each checkpoint. For the teacher, use `--type teacher --model-name teacher`. The exported JSON records the checkpoint path and SHA-256 hash, code commit and clean/dirty state, dataset ID and path, test split, seed, strength, sample limit, parameter count, metrics, and per-condition RGB fingerprints. It contains measured results only; it does not create a score for a model that has not been evaluated.
+
+When reports are available, combine them with:
+
+```bash
+python tools/compare_benchmark_reports.py \
+  runs/benchmark_reports/rgb_baseline.json \
+  runs/benchmark_reports/rgb_augmented.json \
+  --output-dir runs/benchmark_comparison
+```
+
+This writes `comparison.json` and `comparison.csv`. Output files must be new: rerunning with an existing report path or comparison output directory containing these files raises an error instead of replacing them. Missing milestone models appear as `missing` with blank metrics. The comparison rejects duplicate model names or checkpoints, uncommitted or unknown evaluation code, mismatched code commits, dataset IDs, test splits, strengths, seeds, sample limits, or RGB input fingerprints. A matching dataset ID is supplied by the team and cannot itself verify that annotations are identical; use the same agreed dataset copy and annotation version. Training checkpoints may come from different commits, but evaluate all of them with one committed evaluation-code version. Batch size and worker count are recorded but may differ if the input fingerprints still match. Runtime measurements and qualitative examples require separate collection before the main evaluation milestone is complete.
+
+### Event representation
+
+The teacher's event channels are a 2-channel positive/negative histogram over the causal window, log-scaled and normalised into [0, 1]:
+
+```
+channel = min( log1p(count) / log1p(EVENT_SCALE_K), 1 )
+```
+
+`EVENT_SCALE_K = 44` is the 99.9th percentile of non-zero per-pixel event counts, measured on the training split only with `tools/measure_event_scale.py`. Log scaling keeps low counts distinguishable, since a typical active pixel sees only ~2 events, and the divisor puts the event channels on the same [0, 1] scale as RGB. The constant is frozen: teacher and distillation runs must use the same value, and changing it requires retraining the teacher.
 
 ## Dataset and training notes
 
@@ -271,7 +375,7 @@ For fair comparisons between models, use the same dataset split, degradation set
 - Training and validation are both performed on labelled subsets, while test evaluation is reserved for final measurement.
 - The code expects a valid DSEC root path with all required subdirectories aligned to the same sequence ID.
 - On Windows, prefer ASCII-only dataset paths when possible because OpenCV and some file-handling utilities can sometimes fail on non-ASCII characters.
-- The training pipeline saves both a best checkpoint and a latest checkpoint, so progress can resume if a run is interrupted.
+- The training pipeline saves both a best checkpoint and a latest checkpoint after every epoch. To continue an interrupted run in the same folder, pass only its folder: `python train_rgb_student.py --resume runs/student/exp_006`. The settings come from the original run (`run_args.yaml`, or `run_command.txt` for older runs); only `--num-workers` and `--console-level` may be given again. Model, optimiser, EMA and schedules continue exactly, but the shuffle order and augmentation draws after the resume point differ from an uninterrupted run.
 
 ## Testing and validation
 
@@ -345,4 +449,52 @@ Generate examples and descriptive measurements into a new output directory:
 
 ```bash
 python tools/generate_overexposure_examples.py --image "/path/to/rgb.png" --output-dir "runs/issue41_examples/sample_01"
+```
+
+## Deterministic darkening (Issue #40)
+
+`darken(image, strength, seed = 0)` takes the following inputs:
+- `image`: a non-empty `H x W x 3` array
+- `strength`: the intensity of darkening; can be a predefined named level (`minimal`, `mild`, `medium`, `strong`) or a constant between 0 and 1
+- `seed`: an optional integer to determine noise generation & illumination mapping; 0 by default
+
+The method returns a dictionary containing the following: 
+```python
+{
+  'image': ..., # A new, same-shape `uint8` darkened RGB array with added noise
+  'seed': ..., # Seed used to generate the illumination map & noise
+  'global_illum_factor': ..., # Global illumination factor sampled from a designated range (see below)
+  'mean_brightness': ..., # Mean brightness of the resultant image
+  'proportion_dark': ..., # Proportion of discernably dark pixels in the resultant image
+}
+```
+
+BGR-to-RGB conversion is performed on `image` before applying tensor normalization or event concatenation.
+
+```python
+from darkening import darkening
+minimal_rgb = darken(rgb, "minimal", seed = 1234)
+mild_rgb = darken(rgb, "mild", seed = 1234)
+medium_rgb = darken(rgb, "medium", seed = 1234)
+strong_rgb = darken(rgb, "strong", seed = 1234)
+custom_rgb = darken(rgb, 0.6)  # Continuous strength in [0, 1].
+```
+
+| Strength level | Global illumination factor range |
+| --- | ---: |
+| minimal | [0.7, 0.9) |
+| mild | [0.5, 0.7) |
+| medium | [0.3, 0.5) |
+| strong | [0.1, 0.3) |
+
+A custom strength level `i` will generate a global illumination factor range of [`i` - 0.1, `i` + 0.1], bounded by 0 and 1. Note that `i` = 0 will generate a pitch-black image, and `i` = 1 will result in no transformation to the image.
+
+[Day examples](docs/darkening/day_000003.png) and
+[night examples](docs/darkening/night_000005.png) show result, illumination factor, mean brightness, and percentage of discernably dark pixels for each strength level for `interlaken_00_c/000003.png` and `zurich_city_09_a/000005.png` respectively.
+See the [detailed guide](docs/darkening/README.md) for more information.
+
+Generate examples and descriptive measurements into a new output directory:
+
+```bash
+python tools/generate_darkening_examples.py --image "/path/to/rgb.png" --output-dir "runs/issue40_examples/sample_01"
 ```

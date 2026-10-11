@@ -1,6 +1,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 import torch
+from ultralytics.engine.trainer import BaseTrainer
 from ultralytics.nn.tasks import DetectionModel, load_checkpoint as load_checkpoint_weights
 
 def select_device() -> torch.device:
@@ -70,20 +71,39 @@ def set_loss_schedule(model: torch.nn.Module, completed_epochs: int) -> None:
         model.criterion.updates = completed_epochs - 1
         model.criterion.update()
 
-def create_optimiser(model: torch.nn.Module) -> torch.optim.Optimizer:
-    """Create the optimiser for the unfrozen student parameters."""
-    #return torch.optim.SGD(
-    #    (parameter for parameter in model.parameters() if parameter.requires_grad), 
-    #    lr=5e-2, 
-    #    momentum=0.9, 
-    #    weight_decay=1e-4
-    #)
-    return torch.optim.AdamW(
-        (parameter for parameter in model.parameters() if parameter.requires_grad),
-        lr=3e-4,
-        weight_decay=0.0005,
+NOMINAL_BATCH_SIZE = 64
+
+def accumulation_steps(batch_size: int, nominal_batch_size: int = NOMINAL_BATCH_SIZE) -> int:
+    """Batches per optimiser step once warmup is over."""
+    return max(round(nominal_batch_size / batch_size), 1)
+
+OPTIMISER_LR = 0.01
+OPTIMISER_MOMENTUM = 0.9
+WEIGHT_DECAY = 0.0005
+
+def create_optimiser(
+    model: torch.nn.Module, batch_size: int = NOMINAL_BATCH_SIZE
+) -> torch.optim.Optimizer:
+    """MuSGD with Ultralytics' own YOLO26 parameter groups, built by its trainer's optimiser factory.
+
+    Conv/linear weights get the hybrid Muon + SGD update with weight decay, normalisation weights
+    and biases plain SGD without it, and the head's classification layers 3x the learning rate.
+    Weight decay is scaled by the images per optimiser step, as the Ultralytics trainer does.
+    """
+    decay = WEIGHT_DECAY * batch_size * accumulation_steps(batch_size) / NOMINAL_BATCH_SIZE
+    # build_optimizer only reads `self` when picking an optimiser for name="auto", so no trainer is needed
+    return BaseTrainer.build_optimizer(
+        None, model, name="MuSGD", lr=OPTIMISER_LR, momentum=OPTIMISER_MOMENTUM, decay=decay
     )
-    
+
+
+def load_weights(
+    model: torch.nn.Module, checkpoint_path: str | Path, device: torch.device | str
+) -> torch.nn.Module:
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    model.load_state_dict(checkpoint.get("model_state_dict", checkpoint), strict=True)
+    return model
+
 
 def load_checkpoint(
     checkpoint_path: str | Path, 
@@ -122,9 +142,9 @@ def fetch_best_dict(
     optimiser: torch.optim.Optimizer, 
     mode: int = 0
 ) -> dict:
-    """ Load the best checkpoint if it exists, otherwise return default values. """
+    """ Load the best checkpoint if it exists, otherwise return default values."""
     if not Path(best_path).is_file():
-        return {'best_epoch': 0, 'best_val_loss': float('inf')}
+        return {'best_epoch': 0, 'best_map50_95': float('-inf')}
 
     best_state = torch.load(best_path, map_location=device)
 
@@ -132,4 +152,5 @@ def fetch_best_dict(
         model.load_state_dict(best_state["model_state_dict"])
         optimiser.load_state_dict(best_state["optimiser_state_dict"])
 
-    return {'best_epoch': best_state["epoch"], 'best_val_loss': best_state["val_loss"]}
+    best_map50_95 = best_state.get("val_metrics", {}).get("map50_95", float('-inf'))
+    return {'best_epoch': best_state["epoch"], 'best_map50_95': best_map50_95}

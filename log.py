@@ -1,7 +1,9 @@
+import csv
 from pathlib import Path
 import yaml
 import logging
 import sys
+from ultralytics.utils.plotting import plot_results
 
 def create_log_directory(role: str = "teacher") -> Path: 
     """
@@ -33,11 +35,45 @@ def log_model_config(config: dict, log_directory: Path, logger: logging.Logger):
     with open(log_directory / "config.yaml", "w") as file: 
         yaml.dump(config, file)
 
+def log_epoch_results(row: dict, log_directory: Path) -> None:
+    """Add one epoch to results.csv and redraw the training curves as results.png.
+
+    The plot is Ultralytics' plot_results, which draws every column with "loss" or "metric" in its
+    name. A resumed run repeats the interrupted epoch, so rows from that epoch onwards are replaced.
+    """
+    results_file = Path(log_directory) / "results.csv"
+    rows = []
+    if results_file.is_file():
+        with open(results_file, newline="") as file:
+            rows = [old for old in csv.DictReader(file) if int(old["epoch"]) < row["epoch"]]
+    rows.append(row)
+    with open(results_file, "w", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=list(row))
+        writer.writeheader()
+        writer.writerows(rows)
+    plot_results(file=str(results_file))
+
 def log_command(argv: list[str], log_directory: Path):
     command = " ".join(argv)
 
-    with open(log_directory / "run_command.txt", "w") as file: 
+    with open(log_directory / "run_command.txt", "w") as file:
         file.write(command)
+
+    with open(log_directory / "run_args.yaml", "w") as file:
+        yaml.safe_dump([str(arg) for arg in argv], file)
+
+def load_command(log_directory: Path) -> list[str]:
+    """The command a run was started with, as an argv list (script first).
+
+    Runs from before run_args.yaml existed fall back to run_command.txt, which only splits
+    correctly when no argument contains a space.
+    """
+    args_file = Path(log_directory) / "run_args.yaml"
+    if args_file.is_file():
+        with open(args_file) as file:
+            return yaml.safe_load(file)
+    with open(Path(log_directory) / "run_command.txt") as file:
+        return file.readline().split()
 
 def create_logger(
     name: str,
@@ -50,7 +86,7 @@ def create_logger(
 
     for handler in logger.handlers[:]: 
         logger.removeHandler(handler)
-        handler.clear() 
+        handler.close()
 
     log_format = "%(asctime)s %(levelname)-5s %(message)s"
     date_format = "%Y-%m-%d %H:%M:%S"

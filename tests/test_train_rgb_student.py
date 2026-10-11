@@ -11,13 +11,41 @@ from dataset_loader import limit_dataset, yolo_collate_fn
 from utils import DSEC_NAMES, build_model, set_loss_schedule
 from dataset_loader import create_rgb_dataloaders
 from evaluate import validate_model
+from ultralytics.optim import MuSGD
 from utils import (
+    OPTIMISER_LR,
     create_optimiser,
     extract_trainable_model,
     fetch_best_dict,
     load_checkpoint,
     select_device,
 )
+
+
+def param_ids(group):
+    return {id(p) for p in group["params"]}
+
+
+def non_empty(optimiser):
+    # Like Ultralytics, every group is split into a 3x and a 1x half, even when one is empty
+    return [g for g in optimiser.param_groups if g["params"]]
+
+
+def groups_named(optimiser, name):
+    """Both halves (3x and 1x learning rate) of the optimiser groups with this `param_group` name."""
+    return [g for g in optimiser.param_groups if g["param_group"] == name]
+
+
+def ids_in(groups):
+    return set().union(*(param_ids(g) for g in groups))
+
+
+def group_named(optimiser, name):
+    """The non-boosted optimiser group with this Ultralytics `param_group` name."""
+    return next(
+        g for g in optimiser.param_groups
+        if g["param_group"] == name and g["lr"] == OPTIMISER_LR
+    )
 
 
 class TrainRgbStudentTests(unittest.TestCase):
@@ -56,7 +84,12 @@ class TrainRgbStudentTests(unittest.TestCase):
         self.assertEqual(
             dataset_class.call_args_list,
             [
-                call(dataset_path=Path("fake-dataset"), split="train", rgb_only=True),
+                call(
+                    dataset_path=Path("fake-dataset"),
+                    split="train",
+                    rgb_only=True,
+                    augment=False,
+                ),
                 call(
                     dataset_path=Path("fake-dataset"),
                     split="val",
@@ -120,29 +153,50 @@ class TrainRgbStudentTests(unittest.TestCase):
                 self.assertEqual(model.names, DSEC_NAMES)
 
     def test_optimiser_configuration(self):
-        model = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.Linear(4, 2))
-        model[0].requires_grad_(False)
+        model = build_model(ch=3)
         optimiser = create_optimiser(model)
 
-        self.assertIsInstance(optimiser, torch.optim.AdamW)
-        self.assertEqual(optimiser.param_groups[0]["lr"], 1e-4)
-        self.assertEqual(optimiser.param_groups[0]["weight_decay"], 0.0005)
+        self.assertIsInstance(optimiser, MuSGD)
+        for group in non_empty(optimiser):
+            self.assertEqual(group["momentum"], 0.9)
+            self.assertTrue(group["nesterov"])
 
-        optimised = {
-            id(parameter)
-            for group in optimiser.param_groups
-            for parameter in group["params"]
-        }
-        unfrozen = {
-            id(parameter) for parameter in model.parameters() if parameter.requires_grad
-        }
-        frozen = {
-            id(parameter)
-            for parameter in model.parameters()
-            if not parameter.requires_grad
-        }
-        self.assertEqual(optimised, unfrozen)
-        self.assertTrue(optimised.isdisjoint(frozen))
+        # Conv and linear weights get the Muon update with weight decay; biases plain SGD without
+        parameters = list(model.parameters())
+        muon = groups_named(optimiser, "muon")
+        bias = groups_named(optimiser, "bias")
+        self.assertEqual(ids_in(muon), {id(p) for p in parameters if p.ndim in (2, 4)})
+        self.assertTrue(all(g["use_muon"] and g["weight_decay"] == 0.0005 for g in muon))
+        self.assertEqual(ids_in(bias), {id(p) for name, p in model.named_parameters() if name.endswith(".bias")})
+        self.assertTrue(all(not g["use_muon"] and g["weight_decay"] == 0.0 for g in bias))
+
+        # Every parameter is optimised exactly once
+        optimised = [id(p) for g in optimiser.param_groups for p in g["params"]]
+        self.assertEqual(sorted(optimised), sorted(id(p) for p in parameters))
+
+    def test_normalisation_weights_get_no_weight_decay(self):
+        model = build_model(ch=3)
+        optimiser = create_optimiser(model)
+        norms = [m for m in model.modules() if isinstance(m, torch.nn.BatchNorm2d)]
+        norm_weights = groups_named(optimiser, "bn")
+        self.assertEqual(ids_in(norm_weights), {id(m.weight) for m in norms})
+        self.assertTrue(all(g["weight_decay"] == 0.0 for g in norm_weights))
+        self.assertTrue({id(m.bias) for m in norms} <= ids_in(groups_named(optimiser, "bias")))
+
+    def test_yolo26_classification_head_trains_at_three_times_the_rate(self):
+        model = build_model(ch=3)
+        optimiser = create_optimiser(model, batch_size=6)
+        head = model.model[-1]
+        boosted = {id(p) for layer in (head.cv3, head.one2one_cv3) for p in layer.parameters()}
+        for group in non_empty(optimiser):
+            expected_lr = 3 * OPTIMISER_LR if param_ids(group) & boosted else OPTIMISER_LR
+            self.assertEqual(group["lr"], expected_lr)
+        self.assertEqual(
+            set().union(*(param_ids(g) for g in optimiser.param_groups if g["lr"] > OPTIMISER_LR)),
+            boosted,
+        )
+        # Weight decay scales with the images per step: 6 images x 11 batches against 64
+        self.assertAlmostEqual(group_named(optimiser, "muon")["weight_decay"], 0.0005 * 66 / 64)
 
     def test_checkpoint_loads_epoch_model_and_optimiser(self):
         original_model = torch.nn.Linear(10, 2)
@@ -197,6 +251,7 @@ class TrainRgbStudentTests(unittest.TestCase):
                     "optimiser_state_dict": original_optimiser.state_dict(),
                     "epoch": 3,
                     "val_loss": 0.25,
+                    "val_metrics": {"map50_95": 0.4},
                 },
                 path,
             )
@@ -210,7 +265,7 @@ class TrainRgbStudentTests(unittest.TestCase):
                 mode=1,
             )
 
-        self.assertEqual(result, {"best_epoch": 3, "best_val_loss": 0.25})
+        self.assertEqual(result, {"best_epoch": 3, "best_map50_95": 0.4})
         for original, restored in zip(original_model.parameters(), model.parameters()):
             self.assertTrue(torch.equal(original, restored))
 
@@ -265,3 +320,49 @@ class TrainRgbStudentTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EpochResultsTests(unittest.TestCase):
+    def test_results_csv_replaces_a_repeated_epoch_and_draws_the_curves(self):
+        import csv
+        import log
+
+        def row(epoch, loss):
+            return {"epoch": epoch, "train/loss": loss, "val/loss": loss,
+                    "metrics/mAP50": 0.1 * epoch, "metrics/mAP50-95": 0.05 * epoch, "lr": 0.01}
+
+        with tempfile.TemporaryDirectory() as directory:
+            for epoch, loss in ((1, 3.0), (2, 2.0), (3, 1.5)):
+                log.log_epoch_results(row(epoch, loss), Path(directory))
+            # A resumed run repeats epoch 3 after an interruption
+            log.log_epoch_results(row(3, 1.0), Path(directory))
+
+            with open(Path(directory) / "results.csv", newline="") as file:
+                saved = list(csv.DictReader(file))
+            self.assertEqual([r["epoch"] for r in saved], ["1", "2", "3"])
+            self.assertEqual(float(saved[-1]["train/loss"]), 1.0)
+            self.assertTrue((Path(directory) / "results.png").is_file())
+
+
+class LoadWeightsTests(unittest.TestCase):
+    def test_loads_training_checkpoints_and_bare_state_dicts(self):
+        from utils import load_weights
+
+        trained = torch.nn.Linear(3, 2)
+        with tempfile.TemporaryDirectory() as directory:
+            for name, content in (("wrapped.pt", {"model_state_dict": trained.state_dict(), "epoch": 4}),
+                                  ("bare.pt", trained.state_dict())):
+                with self.subTest(checkpoint=name):
+                    path = Path(directory) / name
+                    torch.save(content, path)
+                    model = load_weights(torch.nn.Linear(3, 2), path, "cpu")
+                    self.assertTrue(torch.equal(model.weight, trained.weight))
+
+    def test_rejects_a_checkpoint_for_another_architecture(self):
+        from utils import load_weights
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "other.pt"
+            torch.save({"model_state_dict": torch.nn.Linear(4, 2).state_dict()}, path)
+            with self.assertRaises(RuntimeError):
+                load_weights(torch.nn.Linear(3, 2), path, "cpu")

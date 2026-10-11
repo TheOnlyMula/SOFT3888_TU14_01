@@ -17,7 +17,12 @@ MIN_GAMMA = 0.4
 MAX_BRIGHTNESS_OFFSET = 0.6  # Fraction of the full [0, 1] intensity range.
 
 
-def _resolve_strength(strength: str | float) -> float:
+def resolve_strength(strength: str | float) -> float:
+    """Turn a named level ("mild"/"strong") into its number; pass through a value in [0, 1].
+
+    Shared by both evaluation degradations (dark and overexposed), so "strong" and 1.0 describe
+    the same benchmark.
+    """
     if isinstance(strength, str):
         if strength not in STRENGTH_LEVELS:
             raise ValueError("strength must be 'mild', 'strong', or a number in [0, 1]")
@@ -59,7 +64,7 @@ def overexpose(image: np.ndarray, strength: str | float) -> np.ndarray:
     if image.shape[0] == 0 or image.shape[1] == 0:
         raise ValueError("image must be non-empty")
 
-    value = _resolve_strength(strength)
+    value = resolve_strength(strength)
     if value == 0.0:
         return image.copy()
 
