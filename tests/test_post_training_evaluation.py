@@ -312,10 +312,18 @@ class PostTrainingEvaluationTests(unittest.TestCase):
         self.checkpoint.unlink()
         loader = make_loader(4)
         optimiser = torch.optim.SGD(self.model.parameters(), lr=0.1)
-        with patch(
-            "training.validate_model",
-            side_effect=[val_results(3.0, map50_95=0.5), val_results(1.0, map50_95=0.2)],
-        ):
+        validated_weights = []
+        # Epoch 1 has the higher loss but the higher mAP50-95, so selection must follow mAP
+        validation_results = iter([val_results(3.0, map50_95=0.5), val_results(1.0, map50_95=0.2)])
+
+        def validate_and_record(val_loader, model, device, logger):
+            self.assertIs(val_loader, loader)
+            self.assertIs(device, self.device)
+            self.assertIs(logger, self.logger)
+            validated_weights.append(model.weight.detach().clone())
+            return next(validation_results)
+
+        with patch("training.validate_model", side_effect=validate_and_record):
             path = train_model(
                 loader,
                 loader,
@@ -332,6 +340,8 @@ class PostTrainingEvaluationTests(unittest.TestCase):
         saved = torch.load(path, weights_only=True)
         self.assertEqual(saved["epoch"], 1)
         self.assertEqual(saved["val_metrics"]["map50_95"], 0.5)
+        # The saved weights are exactly the ones validated in the best epoch
+        torch.testing.assert_close(saved["model_state_dict"]["weight"], validated_weights[0])
         # The in-memory model keeps training past the best epoch: it matches the latest checkpoint.
         latest = torch.load(self.latest, weights_only=True)
         self.assertEqual(latest["epoch"], 2)
@@ -397,10 +407,18 @@ class PostTrainingEvaluationTests(unittest.TestCase):
         self.checkpoint.unlink()
         loader = make_loader(4)
         optimiser = torch.optim.SGD(self.model.parameters(), lr=0.1)
-        with patch(
-            "training.validate_model",
-            side_effect=[val_results(1.0, map50_95=0.2), val_results(3.0, map50_95=0.5)],
-        ):
+        validated_weights = []
+        # Epoch 2 has the higher loss but the higher mAP50-95, so it must replace epoch 1
+        validation_results = iter([val_results(1.0, map50_95=0.2), val_results(3.0, map50_95=0.5)])
+
+        def validate_and_record(val_loader, model, device, logger):
+            self.assertIs(val_loader, loader)
+            self.assertIs(device, self.device)
+            self.assertIs(logger, self.logger)
+            validated_weights.append(model.weight.detach().clone())
+            return next(validation_results)
+
+        with patch("training.validate_model", side_effect=validate_and_record):
             train_model(
                 loader,
                 loader,
@@ -416,6 +434,7 @@ class PostTrainingEvaluationTests(unittest.TestCase):
         saved = torch.load(self.checkpoint, weights_only=True)
         self.assertEqual(saved["epoch"], 2)
         self.assertEqual(saved["val_metrics"]["map50_95"], 0.5)
+        torch.testing.assert_close(saved["model_state_dict"]["weight"], validated_weights[1])
 
     def test_invalid_validation_loss_preserves_old_checkpoint(self):
         loader = make_loader(4)
