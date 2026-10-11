@@ -3,6 +3,7 @@ import log
 from dataset_loader import DSECFusionDataset, limit_dataset, yolo_collate_fn
 from training import parse_args, train_model
 from utils import select_device, extract_trainable_model, create_optimiser
+from ultralytics.utils.torch_utils import init_seeds
 
 
 def tiny_loader(dataset_path, num_samples, batch_size):
@@ -13,6 +14,7 @@ def tiny_loader(dataset_path, num_samples, batch_size):
 
 def main():
     args = parse_args("Overfit the RGB student on a tiny training subset.")
+    init_seeds(args.seed, deterministic=True)
     log_directory = log.create_log_directory("overfit")
     logger = log.create_logger("overfit", log_directory)
     device = select_device()
