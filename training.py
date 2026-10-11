@@ -23,7 +23,15 @@ from dataset_loader import (
     DEFAULT_DEGRADATION_SHARES, DEFAULT_STRENGTH_RANGE, DEFAULT_AUGMENTATION_SEED,
     validate_degradation_shares, validate_strength_range, validate_augmentation_seed,
 )
-from distillation import feature_distillation_loss, load_teacher
+from distillation import (
+    DISTILL_MODES,
+    MASK_ENLARGEMENT,
+    distilled_features,
+    feature_distillation_loss,
+    load_teacher,
+    object_distillation_loss,
+    object_region_mask,
+)
 import numpy as np
 from ultralytics.utils.torch_utils import ModelEMA, init_seeds
 from torch.optim.lr_scheduler import LambdaLR
@@ -71,6 +79,7 @@ def train_model(
     latest_path: Path,
     teacher: torch.nn.Module | None = None,
     lambda_distill: float = 0.0,
+    distill_mode: str = "unweighted",
     nominal_batch_size: int = NOMINAL_BATCH_SIZE,
     warmup_epochs: float = WARMUP_EPOCHS,
 ) -> Path:
@@ -87,7 +96,8 @@ def train_model(
 
     With a `teacher`, each batch carries RGB + event channels: the student trains on the RGB
     channels while the frozen teacher sees all of them, and `lambda_distill` weights the
-    distillation term added to the detection loss.
+    distillation term added to the detection loss. `distill_mode` "unweighted" compares features
+    everywhere; "object" only inside each image's enlarged labelled boxes.
     """
     if len(train_loader) == 0 or len(val_loader) == 0:
         message = "Training and validation loaders must both be non-empty."
@@ -186,7 +196,16 @@ def train_model(
                 loss, loss_items = model.loss(student_batch, student_preds)
                 with torch.no_grad():
                     teacher_preds = teacher(batch_data["img"])
-                distill_loss = feature_distillation_loss(student_preds, teacher_preds)
+                if distill_mode == "object":
+                    mask = object_region_mask(
+                        batch_data["batch_idx"],
+                        batch_data["bboxes"],
+                        imgs.shape[0],
+                        distilled_features(student_preds, teacher_preds)[0].shape[-2:],
+                    )
+                    distill_loss = object_distillation_loss(student_preds, teacher_preds, mask).mean()
+                else:
+                    distill_loss = feature_distillation_loss(student_preds, teacher_preds)
 
             total_loss = loss.sum()
             if distill_loss is not None:
@@ -312,8 +331,9 @@ def train_model(
             )
         if teacher is not None:
             logger.info(
-                "  train distill_loss = %.4f (lambda = %.3g, contribution = %.4f)",
+                "  train distill_loss = %.4f (mode = %s, lambda = %.3g, contribution = %.4f)",
                 train_results["distill_loss"],
+                distill_mode,
                 lambda_distill,
                 lambda_distill * train_results["distill_loss"],
             )
@@ -410,6 +430,11 @@ def parse_args(description: str) -> argparse.Namespace:
         help="Weight of the distillation term added to the detection loss.",
     )
     parser.add_argument(
+        "--distill-mode", choices=DISTILL_MODES, default="unweighted",
+        help="Where the distillation term compares features: 'unweighted' everywhere (baseline) "
+             "or 'object' only inside the enlarged labelled boxes. Needs --teacher-checkpoint.",
+    )
+    parser.add_argument(
         "--seed", type=int, default=0,
         help="Seed for model initialisation, shuffling and augmentation. Use the same seed for "
              "every student you compare.",
@@ -439,6 +464,8 @@ def parse_args(description: str) -> argparse.Namespace:
         parser.error("--max-samples must be positive")
     if args.lambda_distill < 0:
         parser.error("--lambda-distill must be non-negative")
+    if args.distill_mode != "unweighted" and args.teacher_checkpoint is None:
+        parser.error("--distill-mode needs --teacher-checkpoint")
     return args
 
 
@@ -574,6 +601,8 @@ def main(role: str, rgb_only: bool) -> None:
         'Deterministic': True,
         'Teacher Checkpoint': str(args.teacher_checkpoint) if distilling else None,
         'Lambda Distill': args.lambda_distill if distilling else None,
+        'Distill Mode': args.distill_mode if distilling else None,
+        'Object Mask Enlargement': MASK_ENLARGEMENT if distilling and args.distill_mode == "object" else None,
         'Training Augmentation': {
             'enabled': args.degradation_augmentation,
             'shares': dict(zip(('clean', 'dark', 'overexposed'), args.degradation_shares)),
@@ -601,6 +630,7 @@ def main(role: str, rgb_only: bool) -> None:
         latest_path=latest_path,
         teacher=teacher,
         lambda_distill=args.lambda_distill,
+        distill_mode=args.distill_mode,
     )
 
     if args.skip_test:
