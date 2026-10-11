@@ -21,6 +21,8 @@ import training
 
 class FakeRGBFrames:
     """Picklable fixture so tests also exercise spawn/forkserver workers."""
+    directories = {}  # no per-sequence caches to snapshot
+
     def __len__(self):
         return 24
 

@@ -12,6 +12,8 @@ from dataset_loader import DSECFusionDataset, degradation_seed, rgb_loader_finge
 
 
 class _PicklableDSECDet:
+    directories = {}  # no per-sequence caches to snapshot
+
     def __init__(self):
         self.directory = SimpleNamespace(
             root=SimpleNamespace(name="zurich_city_00_a")

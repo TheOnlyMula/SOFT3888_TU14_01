@@ -1,8 +1,10 @@
 import argparse
 import math
+import os
 from numbers import Integral
 from functools import lru_cache
 from pathlib import Path
+from types import SimpleNamespace
 import hashlib
 import cv2
 import h5py
@@ -12,7 +14,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader, Subset, get_worker_info
 from dsec_det.dataset import DSECDet
 from dsec_det.label import CLASSES, COLORS
-from dsec_det.io import extract_from_h5_by_timewindow, yaml_file_to_dict
+from dsec_det.io import yaml_file_to_dict
 from overexposure import STRENGTH_LEVELS, overexpose, resolve_strength
 from darkening import STRENGTH_RANGES as DARKENING_LEVELS, darken
 from augment import augment_sample
@@ -129,6 +131,36 @@ def event_time_offset_us(event_file: str) -> int:
         return int(h5f["t_offset"][()])
 
 
+_open_event_files: dict[int, dict[str, h5py.File]] = {}
+
+
+def read_event_window(event_file, t_min_us: int, t_max_us: int) -> dict:
+    handles = _open_event_files.setdefault(os.getpid(), {})
+    h5f = handles.get(str(event_file))
+    if h5f is None:
+        h5f = handles[str(event_file)] = h5py.File(event_file, "r")
+
+    ms_to_idx = h5f["ms_to_idx"]
+    t_offset = int(h5f["t_offset"][()])
+    start = int(ms_to_idx[(t_min_us - t_offset) // 1000])
+    end_ms = min(max((t_max_us - t_offset) // 1000, 0), len(ms_to_idx) - 1)
+    end = int(ms_to_idx[end_ms])
+    events = h5f["events"]
+    return {key: events[key][start:end] for key in ("x", "y", "p")}
+
+
+def snapshot_directory_caches(base_dataset: DSECDet) -> None:
+    for directory in base_dataset.directories.values():
+        images, tracks, events = directory.images, directory.tracks, directory.events
+        directory.images = SimpleNamespace(
+            root=images.root,
+            timestamps=images.timestamps,
+            image_files_distorted=images.image_files_distorted,
+        )
+        directory.tracks = SimpleNamespace(root=tracks.root, tracks=tracks.tracks)
+        directory.events = SimpleNamespace(root=events.root, event_file=events.event_file)
+
+
 def load_causal_events(
     base_dataset: DSECDet, idx: int, window_us: int = EVENT_WINDOW_US
 ) -> dict:
@@ -139,12 +171,13 @@ def load_causal_events(
     50 ms before it but pairs the image with the previous frame's labels. So images and labels come
     from DSECDet (sync="back", which keeps them aligned) and the event window is built here.
     At the start of a recording the window is clipped, so the first frame of a sequence has few or no events.
+    Returns the events' x, y and polarity.
     """
     index, _, directory = base_dataset.rel_index(idx)
     t_image = int(directory.images.timestamps[index])
     event_file = directory.events.event_file
     t_start = max(t_image - window_us, event_time_offset_us(str(event_file)))
-    return extract_from_h5_by_timewindow(event_file, t_start, t_image)
+    return read_event_window(event_file, t_start, t_image)
 
 
 class DSECFusionDataset(Dataset):
@@ -177,6 +210,7 @@ class DSECFusionDataset(Dataset):
         self.base_dataset = DSECDet(
             dataset_path, split=split, sync="back", split_config=split_config
         )
+        snapshot_directory_caches(self.base_dataset)
         self.rgb_only = rgb_only
 
         valid_degradations = {"clean", "dark", "overexposed"}
