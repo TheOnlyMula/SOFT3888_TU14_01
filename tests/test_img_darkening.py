@@ -64,7 +64,15 @@ class DarkeningTests(unittest.TestCase):
         self.assertNotEqual(first["global_illum_factor"], second["global_illum_factor"])
         self.assertFalse(np.array_equal(first["image"], second["image"]))
 
-    def test_brightness_decreases_from_clean_to_mild_to_strong(self):
+    def test_pre_noise_brightness_decreases_from_clean_to_mild_to_strong(self):
+        clean_brightness = float(self.image.mean())
+        mild = darken(self.image, "mild", seed=29)
+        strong = darken(self.image, "strong", seed=29)
+
+        self.assertGreater(clean_brightness, float(mild["mean_brightness"]))
+        self.assertGreater(float(mild["mean_brightness"]), float(strong["mean_brightness"]))
+
+    def test_post_noise_brightness_decreases_from_clean_to_mild_to_strong(self):
         clean_brightness = float(self.image.mean())
         mild = darken(self.image, "mild", seed=29)
         strong = darken(self.image, "strong", seed=29)
