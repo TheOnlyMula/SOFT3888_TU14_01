@@ -103,3 +103,18 @@ overwritten. Non-ASCII Windows paths are supported.
 The tool describes the generated images. It does not enforce the 2% target,
 compare presets against acceptance criteria, or report test pass/fail results.
 The images, measurements and documented API support independent test writing.
+
+## Re-run the night-frame acceptance check
+
+Set `DSEC_ROOT` to the dataset folder containing
+`train/zurich_city_09_a/images/left/distorted/`, then run:
+
+```bash
+python -m unittest discover -s tests -p "test_overexposure*.py" -v
+```
+
+The night-frame test checks the source hashes before evaluating the four
+documented frames. It is marked **skipped** when `DSEC_ROOT` is unset; a full
+acceptance run must report it as **ok**. It checks clean < mild < strong for
+mean brightness and fully saturated share, plus the documented 2% strong
+saturation floor on each night frame.
