@@ -7,6 +7,8 @@ variant restricts the loss to. This module is training-only: inference never imp
 """
 import logging
 import math
+import json
+from functools import lru_cache
 from pathlib import Path
 
 import torch
@@ -31,7 +33,22 @@ DISTILL_MODES = ("unweighted", "object")
 MASK_EPS = 1e-6
 
 
-def event_density(teacher_images: torch.Tensor, reference: float) -> torch.Tensor:
+@lru_cache(maxsize=1)
+def load_event_density_reference() -> float:
+    """Read the frozen training-only coverage reference once per process."""
+    path = Path(__file__).resolve().parent / "docs" / "event_density_reference.json"
+    with path.open(encoding="utf-8") as stream:
+        metadata = json.load(stream)
+    if (metadata["split"] != "train" or metadata["region"] != "whole_frame"
+            or metadata["event_window_us"] != 50_000):
+        raise ValueError("event-density reference must use training-only causal 50 ms whole-frame coverage")
+    reference = float(metadata["event_density_reference"])
+    if not math.isfinite(reference) or not 0 < reference <= 1:
+        raise ValueError("event-density reference must be finite and in (0, 1]")
+    return reference
+
+
+def event_density(teacher_images: torch.Tensor, reference: float | None = None) -> torch.Tensor:
     """Return one deterministic whole-frame event-density score per teacher input.
 
     ``teacher_images`` is the same B x 5 x H x W RGB + event tensor passed to
@@ -41,10 +58,13 @@ def event_density(teacher_images: torch.Tensor, reference: float) -> torch.Tenso
     of event count. The score is active pixels / (H * W) / reference, clipped
     to [0, 1]. No resizing, resampling or separate event-window read is used.
 
-    ``reference`` must be a fixed positive coverage fraction, shared by all
-    frames; measuring and freezing that training-split value is separate.
+    By default, ``reference`` is loaded from docs/event_density_reference.json.
+    An explicit reference must be a fixed positive coverage fraction shared
+    by all frames, rather than recomputed for each frame or batch.
     This helper computes the score only; it does not change the training loss.
     """
+    if reference is None:
+        reference = load_event_density_reference()
     if not math.isfinite(reference) or not 0 < reference <= 1:
         raise ValueError("event-density reference must be finite and in (0, 1]")
     if teacher_images.ndim != 4 or teacher_images.shape[1] != 5:
