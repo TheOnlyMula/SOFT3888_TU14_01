@@ -88,6 +88,8 @@ The distillation loss is the smooth L1 distance between the student's and the fr
 
 The mask is built in the training step only and is never part of evaluation or inference. Each epoch logs `distill_loss`, the mode and the weighted contribution to the total loss; `config.yaml` records the mode and the mask enlargement.
 
+`distillation.event_density(teacher_images, reference)` computes a score for each frame from the same 5-channel input tensor passed to the teacher, whose event channels contain the causal 50 ms histogram. Coverage uses the whole frame: a pixel is active if either event polarity is positive, and each pixel counts once. The score is `clamp(active_pixels / (height * width) / reference, 0, 1)`. Pass a fixed reference coverage fraction in `(0, 1]`, shared across frames; this is separate from the per-pixel count scale `EVENT_SCALE_K`. Reference measurement and freezing are deferred. This helper does not yet apply quality weighting to the training loss.
+
 ### train_rgb_student.py and train_teacher.py
 
 Thin entry points into `training.py`. The two models are trained identically; the only difference is the input:

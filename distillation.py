@@ -6,6 +6,7 @@ counts equally. object_region_mask marks the labelled object regions that the ob
 variant restricts the loss to. This module is training-only: inference never imports it.
 """
 import logging
+import math
 from pathlib import Path
 
 import torch
@@ -28,6 +29,32 @@ DISTILL_MODES = ("unweighted", "object")
 
 # Keeps the object-aware loss finite (zero) for images without labelled objects.
 MASK_EPS = 1e-6
+
+
+def event_density(teacher_images: torch.Tensor, reference: float) -> torch.Tensor:
+    """Return one deterministic whole-frame event-density score per teacher input.
+
+    ``teacher_images`` is the same B x 5 x H x W RGB + event tensor passed to
+    the teacher. Its last two channels hold the causal 50 ms histogram built
+    by DSECFusionDataset. Log scaling and clipping preserve event occupancy.
+    A pixel counts once if either polarity has at least one event, regardless
+    of event count. The score is active pixels / (H * W) / reference, clipped
+    to [0, 1]. No resizing, resampling or separate event-window read is used.
+
+    ``reference`` must be a fixed positive coverage fraction, shared by all
+    frames; measuring and freezing that training-split value is separate.
+    This helper computes the score only; it does not change the training loss.
+    """
+    if not math.isfinite(reference) or not 0 < reference <= 1:
+        raise ValueError("event-density reference must be finite and in (0, 1]")
+    if teacher_images.ndim != 4 or teacher_images.shape[1] != 5:
+        raise ValueError("teacher images must have shape (B, 5, H, W)")
+    if teacher_images.shape[2] == 0 or teacher_images.shape[3] == 0:
+        raise ValueError("teacher images must have non-empty spatial dimensions")
+
+    active = (teacher_images[:, 3:5].detach() > 0).any(dim=1)
+    coverage = active.to(dtype=torch.float32).mean(dim=(1, 2))
+    return (coverage / reference).clamp(0, 1)
 
 
 def load_teacher(
