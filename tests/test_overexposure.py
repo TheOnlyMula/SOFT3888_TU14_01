@@ -1,7 +1,7 @@
 """Unit tests for overexposure.py (Issue #41).
 
 Run from the repository root:
-    python -m unittest tests.test_overexposure -v
+    python -m unittest discover -s tests -p "test_overexposure.py" -v
 """
 
 import unittest
@@ -95,6 +95,14 @@ class TestFormula(unittest.TestCase):
 
 
 class TestMonotonicity(unittest.TestCase):
+    def test_mean_brightness_increases_from_clean_to_mild_to_strong(self):
+        image = random_image(seed=14)
+        clean_mean = float(image.mean())
+        mild_mean = float(overexpose(image, "mild").mean())
+        strong_mean = float(overexpose(image, "strong").mean())
+        self.assertLess(clean_mean, mild_mean)
+        self.assertLess(mild_mean, strong_mean)
+
     def test_never_darkens_a_pixel(self):
         image = random_image(seed=1)
         for strength in (0.05, 0.35, 0.8, 1.0):
