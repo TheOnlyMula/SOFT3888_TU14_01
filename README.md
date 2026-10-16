@@ -10,7 +10,14 @@ Our capstone project for SOFT3888 aims to address the drawbacks of RGB cameras i
 SOFT3888_TU14_01/
 ├── README.md
 ├── dataset_loader.py
-├── training.py
+├── training/
+│   ├── __init__.py
+│   ├── cli.py
+│   ├── run.py
+│   ├── loop.py
+│   ├── losses.py
+│   ├── schedule.py
+│   └── reporting.py
 ├── distillation.py
 ├── train_distilled_student.py
 ├── train_rgb_student.py
@@ -59,9 +66,20 @@ Training-time augmentation, used by every model so student comparisons stay matc
 
 Pixels uncovered by the zoom or shift are grey (114) in RGB and 0 in the event channels, since any other event value would invent events. Boxes that end up mostly outside the image, or cut into slivers more than 100 times longer than wide, are dropped. Every sample makes the same random draws with or without events, so for the same `--seed` the RGB student and the distilled student see identical augmented RGB.
 
-### training.py
+### training/
 
-The shared training pipeline used by both models. It:
+The shared training pipeline used by both models. The entry scripts import `main` from the package; its modules follow the order a run happens in:
+
+| Module | Contents |
+| --- | --- |
+| `cli.py` | `parse_args` and `--resume` handling |
+| `run.py` | `main()`: builds the data, models and optimiser from the arguments, writes `config.yaml`, trains, then tests |
+| `loop.py` | `train_model()`: epochs, gradient accumulation, optimiser steps, validation and best-checkpoint selection |
+| `losses.py` | `batch_losses()`: one batch's detection loss and, with a teacher, its distillation loss for each `--distill-mode` |
+| `schedule.py` | warmup constants, `lr_factor` and `apply_warmup` (Ultralytics' schedule) |
+| `reporting.py` | each epoch's `train.log` summary, its `results.csv` row and the quality-weight statistics |
+
+The pipeline:
 
 - builds a DSEC RGB dataloader for train/validation splits,
 - initialises a YOLO model from the pretrained `yolo26n.pt` checkpoint,
@@ -122,7 +140,7 @@ Before final training, run `python tools/measure_event_density.py --dataset-path
 
 ### train_rgb_student.py and train_teacher.py
 
-Thin entry points into `training.py`. The two models are trained identically; the only difference is the input:
+Thin entry points into the `training` package. The two models are trained identically; the only difference is the input:
 
 - `train_rgb_student.py`: 3 channels (RGB).
 - `train_teacher.py`: 5 channels (RGB + 2-channel event histogram).

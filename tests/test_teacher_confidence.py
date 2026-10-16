@@ -76,7 +76,7 @@ class TeacherConfidenceTrainingTests(unittest.TestCase):
         student = extract_trainable_model(ch=3, weights_path=None, device="cpu")
         teacher = build_model(5).eval().requires_grad_(False)
         original_forward = teacher.forward
-        original_confidence = training.teacher_confidence
+        original_confidence = training.losses.teacher_confidence
         forward_results = []
         forward_grad_modes = []
         confidence_calls = []
@@ -98,9 +98,9 @@ class TeacherConfidenceTrainingTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as directory, \
                 patch.object(teacher, "forward", side_effect=record_forward) as forward, \
-                patch.object(training, "teacher_confidence", side_effect=record_confidence) as confidence, \
-                patch.object(training, "feature_distillation_loss", wraps=training.feature_distillation_loss) as distillation_loss, \
-                patch.object(training, "validate_model", return_value=validation_results):
+                patch.object(training.losses, "teacher_confidence", side_effect=record_confidence) as confidence, \
+                patch.object(training.losses, "feature_distillation_loss", wraps=training.losses.feature_distillation_loss) as distillation_loss, \
+                patch.object(training.loop, "validate_model", return_value=validation_results):
             training.train_model(
                 loader, loader, student,
                 torch.optim.SGD(student.parameters(), lr=0.01),
@@ -132,7 +132,7 @@ class TeacherConfidenceTrainingTests(unittest.TestCase):
             pin_memory=False, persistent_workers=False,
         )
         with tempfile.TemporaryDirectory() as directory, patch.multiple(
-            training,
+            training.run,
             select_device=MagicMock(return_value=torch.device("cpu")),
             init_seeds=MagicMock(),
             create_dataloaders=MagicMock(return_value=(loader, loader)),
@@ -140,9 +140,9 @@ class TeacherConfidenceTrainingTests(unittest.TestCase):
             load_teacher=MagicMock(),
             create_optimiser=MagicMock(return_value=object()),
             train_model=MagicMock(return_value=Path(directory) / "best.pt"),
-        ), patch.object(training.log, "create_log_directory", return_value=Path(directory)), \
-                patch.object(training.log, "create_logger", return_value=MagicMock()), \
-                patch.object(training.log, "log_command"), \
+        ), patch.object(training.run.log, "create_log_directory", return_value=Path(directory)), \
+                patch.object(training.run.log, "create_logger", return_value=MagicMock()), \
+                patch.object(training.run.log, "log_command"), \
                 patch("sys.argv", ["train", "--dataset-path", "fake", "--skip-test",
                                    "--teacher-checkpoint", "teacher.pt"]):
             training.main(role="distill", rgb_only=True)
