@@ -6,9 +6,8 @@ counts equally. object_region_mask marks the labelled object regions that the ob
 variant restricts the loss to. This module is training-only: inference never imports it.
 """
 import logging
-from pathlib import Path
-
 import math
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -76,7 +75,13 @@ def teacher_confidence(
         else teacher_preds
     )
 
-    nms_threshold = math.nextafter(threshold, -math.inf)
+    # NMS uses strict >, so step down in the predictions' dtype before filtering.
+    # Compute the scalar on CPU to avoid synchronizing GPU predictions each batch.
+    threshold_value = torch.tensor(threshold, dtype=raw_predictions.dtype)
+    nms_threshold = torch.nextafter(
+        threshold_value,
+        torch.tensor(-math.inf, dtype=raw_predictions.dtype),
+    ).item()
 
     detections = non_max_suppression(
         raw_predictions,
