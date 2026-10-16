@@ -26,13 +26,15 @@ from dataset_loader import (
 from distillation import (
     DISTILL_MODES,
     MASK_ENLARGEMENT,
-    TEACHER_CONFIDENCE_THRESHOLD,
-    teacher_confidence,
+    TEACHER_CONF_THRESHOLD,
     distilled_features,
     feature_distillation_loss,
+    load_event_density_reference,
     load_teacher,
     object_distillation_loss,
     object_region_mask,
+    quality_weight,
+    quality_weighted_loss,
 )
 import numpy as np
 from ultralytics.utils.torch_utils import ModelEMA, init_seeds
@@ -99,7 +101,10 @@ def train_model(
     With a `teacher`, each batch carries RGB + event channels: the student trains on the RGB
     channels while the frozen teacher sees all of them, and `lambda_distill` weights the
     distillation term added to the detection loss. `distill_mode` "unweighted" compares features
-    everywhere; "object" only inside each image's enlarged labelled boxes.
+    everywhere; "object" only inside each image's enlarged labelled boxes. "object-quality" is
+    "object" with each image's loss scaled by its quality weight w = clip(s_e * c_t, 0, 1), so
+    the batch distillation loss is the mean of w_i * L_distill_i; each epoch then logs the mean,
+    minimum and maximum w and the fraction of images with w = 0.
     """
     if len(train_loader) == 0 or len(val_loader) == 0:
         message = "Training and validation loaders must both be non-empty."
@@ -166,6 +171,7 @@ def train_model(
         totals = {"loss": 0.0, "box_loss": 0.0, "cls_loss": 0.0, "l1_loss": 0.0}
         if teacher is not None:
             totals["distill_loss"] = 0.0
+        quality_weights = []  # Every training image's w this epoch ("object-quality" mode only)
         images_seen = 0
         grad_norm = float("nan")
         epoch_start = time.monotonic()
@@ -198,18 +204,21 @@ def train_model(
                 loss, loss_items = model.loss(student_batch, student_preds)
                 with torch.no_grad():
                     teacher_preds = teacher(batch_data["img"])
-                    teacher_confidences = teacher_confidence(
-                        teacher_preds,
-                        threshold=TEACHER_CONFIDENCE_THRESHOLD,
-                    )
-                if distill_mode == "object":
+                if distill_mode in ("object", "object-quality"):
                     mask = object_region_mask(
                         batch_data["batch_idx"],
                         batch_data["bboxes"],
                         imgs.shape[0],
                         distilled_features(student_preds, teacher_preds)[0].shape[-2:],
                     )
-                    distill_loss = object_distillation_loss(student_preds, teacher_preds, mask).mean()
+                    per_image_loss = object_distillation_loss(student_preds, teacher_preds, mask)
+                    if distill_mode == "object-quality":
+                        # The only difference from "object": each image's loss is scaled by its w
+                        weight = quality_weight(batch_data["img"], teacher_preds)
+                        quality_weights.append(weight.cpu())
+                        distill_loss = quality_weighted_loss(per_image_loss, weight)
+                    else:
+                        distill_loss = per_image_loss.mean()
                 else:
                     distill_loss = feature_distillation_loss(student_preds, teacher_preds)
 
@@ -273,6 +282,15 @@ def train_model(
         scheduler.step()
         train_time = time.monotonic() - epoch_start
         train_results = {name: total / num_batches for name, total in totals.items()}
+        weight_stats = {}
+        if quality_weights:
+            weights = torch.cat(quality_weights)
+            weight_stats = {
+                "mean": weights.mean().item(),
+                "min": weights.min().item(),
+                "max": weights.max().item(),
+                "zero_fraction": (weights == 0).float().mean().item(),
+            }
 
         # Validate using the EMA model for smooth, stable metrics
         val_start = time.monotonic()
@@ -343,6 +361,14 @@ def train_model(
                 lambda_distill,
                 lambda_distill * train_results["distill_loss"],
             )
+        if weight_stats:
+            logger.info(
+                "  train quality_weight mean = %.4f min = %.4f max = %.4f zero_fraction = %.4f",
+                weight_stats["mean"],
+                weight_stats["min"],
+                weight_stats["max"],
+                weight_stats["zero_fraction"],
+            )
         logger.info(
             "  val   precision = %.4f recall = %.4f mAP50 = %.4f mAP50-95 = %.4f agnostic_mAP50 = %.4f",
             val_results["precision"],
@@ -357,6 +383,8 @@ def train_model(
         row.update({f"train/{name}": train_results[name] for name in loss_names})
         if teacher is not None:
             row["train/distill_loss"] = train_results["distill_loss"]
+        # No "loss" or "metric" in these names, so plot_results leaves them out of its loss grid
+        row.update({f"train/quality_weight_{name}": value for name, value in weight_stats.items()})
         row.update({
             "metrics/precision": val_results["precision"],
             "metrics/recall": val_results["recall"],
@@ -437,8 +465,9 @@ def parse_args(description: str) -> argparse.Namespace:
     )
     parser.add_argument(
         "--distill-mode", choices=DISTILL_MODES, default="unweighted",
-        help="Where the distillation term compares features: 'unweighted' everywhere (baseline) "
-             "or 'object' only inside the enlarged labelled boxes. Needs --teacher-checkpoint.",
+        help="Where the distillation term compares features: 'unweighted' everywhere (baseline), "
+             "'object' only inside the enlarged labelled boxes, or 'object-quality' as 'object' "
+             "with each image's loss scaled by w = clip(s_e * c_t, 0, 1). Needs --teacher-checkpoint.",
     )
     parser.add_argument(
         "--seed", type=int, default=0,
@@ -545,6 +574,19 @@ def main(role: str, rgb_only: bool) -> None:
         message = "--teacher-checkpoint only applies to the RGB student."
         logger.error(message)
         raise ValueError(message)
+    quality_weighted = distilling and args.distill_mode == "object-quality"
+    event_density_reference = None
+    if quality_weighted:
+        # Read the frozen s_e reference now, so a missing file stops the run before training
+        try:
+            event_density_reference = load_event_density_reference()
+        except FileNotFoundError as error:
+            message = (
+                "--distill-mode object-quality needs docs/event_density_reference.json; "
+                "create it once with tools/measure_event_density.py."
+            )
+            logger.error(message)
+            raise FileNotFoundError(message) from error
 
     model = extract_trainable_model(
         ch=input_channels,
@@ -608,10 +650,9 @@ def main(role: str, rgb_only: bool) -> None:
         'Teacher Checkpoint': str(args.teacher_checkpoint) if distilling else None,
         'Lambda Distill': args.lambda_distill if distilling else None,
         'Distill Mode': args.distill_mode if distilling else None,
-        'Teacher Confidence Threshold': (
-            TEACHER_CONFIDENCE_THRESHOLD if distilling else None
-        ),
-        'Object Mask Enlargement': MASK_ENLARGEMENT if distilling and args.distill_mode == "object" else None,
+        'Object Mask Enlargement': MASK_ENLARGEMENT if distilling and args.distill_mode != "unweighted" else None,
+        'Teacher Confidence Threshold': TEACHER_CONF_THRESHOLD if quality_weighted else None,
+        'Event Density Reference': event_density_reference,
         'Training Augmentation': {
             'enabled': args.degradation_augmentation,
             'shares': dict(zip(('clean', 'dark', 'overexposed'), args.degradation_shares)),

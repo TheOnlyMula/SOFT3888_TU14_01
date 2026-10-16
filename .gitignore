@@ -3,7 +3,6 @@
 *.pth
 *.onnx
 
-
 # Training runs, logs, and prediction overlays
 runs/
 *.log

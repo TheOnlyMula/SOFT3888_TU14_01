@@ -3,7 +3,9 @@
 The teacher sees RGB + event channels; the student only ever sees the RGB channels of the
 same frame. feature_distillation_loss is the basic (unweighted) baseline: every spatial location
 counts equally. object_region_mask marks the labelled object regions that the object-aware
-variant restricts the loss to. This module is training-only: inference never imports it.
+variant restricts the loss to, and quality_weight gives each image the deterministic weight
+w = clip(s_e * c_t, 0, 1) that the quality-weighted variant scales that loss by. This module is
+training-only: inference never imports it.
 """
 import logging
 import math
@@ -31,7 +33,7 @@ MASK_ENLARGEMENT = 1.2
 
 TEACHER_CONFIDENCE_THRESHOLD = 0.25
 
-DISTILL_MODES = ("unweighted", "object")
+DISTILL_MODES = ("unweighted", "object", "object-quality")
 
 # Keeps the object-aware loss finite (zero) for images without labelled objects.
 MASK_EPS = 1e-6
@@ -65,7 +67,7 @@ def event_density(teacher_images: torch.Tensor, reference: float | None = None) 
     By default, ``reference`` is loaded from docs/event_density_reference.json.
     An explicit reference must be a fixed positive coverage fraction shared
     by all frames, rather than recomputed for each frame or batch.
-    This helper computes the score only; it does not change the training loss.
+    This is s_e: quality_weight combines it with the teacher's confidence.
     """
     if reference is None:
         reference = load_event_density_reference()
@@ -113,7 +115,7 @@ def teacher_confidence(
     """Mean confidence of the teacher's retained detections for each image.
 
     Detections at or above threshold are retained. Images with no retained
-    detections receive confidence 0.
+    detections receive confidence 0. This is c_t in quality_weight.
     """
     raw_predictions = (
         teacher_preds[0]
@@ -144,6 +146,16 @@ def teacher_confidence(
             scores.append(retained[:, 4].mean())
 
     return torch.stack(scores)
+
+
+def quality_weight(event_densities: torch.Tensor, teacher_confidences: torch.Tensor) -> torch.Tensor:
+    """The deterministic quality weight w = clip(s_e * c_t, 0, 1), one value per image.
+
+    s_e is event_density of the teacher's input and c_t is teacher_confidence of its output, so a
+    sparse event window or an unsure teacher lowers w. w is detached and has no parameters:
+    nothing in it is learned, and no gradient flows through it.
+    """
+    return (event_densities * teacher_confidences).clamp(0, 1).detach()
 
 
 def object_region_mask(
@@ -201,6 +213,17 @@ def object_distillation_loss(
     student_feature, teacher_feature = distilled_features(student_preds, teacher_preds, level)
     distance = F.smooth_l1_loss(student_feature, teacher_feature.detach(), reduction="none").mean(dim=1)
     return (mask * distance).sum(dim=(1, 2)) / (mask.sum(dim=(1, 2)) + MASK_EPS)
+
+
+def quality_weighted_loss(per_image_loss: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """The object-quality batch distillation loss: the mean of w_i * L_distill_i over the batch.
+
+    L_distill_i is image i's object_distillation_loss and w_i its quality_weight. The mean runs
+    over every image in the batch, including those with w = 0, so a down-weighted image lowers
+    the batch loss rather than passing its share to the other images. With every w_i = 1 this is
+    exactly the "object" batch loss. w is detached, so the gradient flows only through L_distill_i.
+    """
+    return (weight.detach() * per_image_loss).mean()
 
 
 def distilled_features(student_preds, teacher_preds, level: int = DISTILL_LEVEL):
