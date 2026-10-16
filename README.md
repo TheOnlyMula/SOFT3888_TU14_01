@@ -86,7 +86,7 @@ The distillation loss is the smooth L1 distance between the student's and the fr
 - `unweighted` (default, the baseline): every spatial location counts equally.
 - `object`: only the labelled objects count (proposal eq. 2). Each image's boxes, after augmentation, are enlarged by `MASK_ENLARGEMENT` (1.2) about their centres and marked on the feature grid; the distance is averaged over those cells. Images without objects add no distillation loss. With a mask covering everything, this equals the unweighted loss, so one `--lambda-distill` serves both modes.
 
-The mask is built in the training step only and is never part of evaluation or inference. Each epoch logs `distill_loss`, the mode and the weighted contribution to the total loss; `config.yaml` records the mode and the mask enlargement.
+The mask is built in the training step only and is never part of evaluation or inference. Each epoch logs `distill_loss`, the mode and the weighted contribution to the total loss; `config.yaml` records the distillation mode, mask enlargement, and teacher confidence threshold.
 
 ### train_rgb_student.py and train_teacher.py
 
