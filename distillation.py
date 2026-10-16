@@ -14,6 +14,8 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
+from ultralytics.utils.nms import non_max_suppression
+
 from utils import build_model, load_weights
 
 # Neck features fed to the detection head. The student and teacher share this architecture,
@@ -26,6 +28,8 @@ DISTILL_TARGET = "one2many"
 DISTILL_LEVEL = 0
 
 MASK_ENLARGEMENT = 1.2
+
+TEACHER_CONFIDENCE_THRESHOLD = 0.25
 
 DISTILL_MODES = ("unweighted", "object")
 
@@ -100,6 +104,46 @@ def load_teacher(
 def head_outputs(preds) -> dict:
     """The head's prediction dict, whether the model ran in train or eval mode."""
     return preds[1] if isinstance(preds, (list, tuple)) else preds
+
+
+def teacher_confidence(
+    teacher_preds,
+    threshold: float = TEACHER_CONFIDENCE_THRESHOLD,
+) -> torch.Tensor:
+    """Mean confidence of the teacher's retained detections for each image.
+
+    Detections at or above threshold are retained. Images with no retained
+    detections receive confidence 0.
+    """
+    raw_predictions = (
+        teacher_preds[0]
+        if isinstance(teacher_preds, (list, tuple))
+        else teacher_preds
+    )
+
+    # NMS uses strict >, so step down in the predictions' dtype before filtering.
+    # Compute the scalar on CPU to avoid synchronizing GPU predictions each batch.
+    threshold_value = torch.tensor(threshold, dtype=raw_predictions.dtype)
+    nms_threshold = torch.nextafter(
+        threshold_value,
+        torch.tensor(-math.inf, dtype=raw_predictions.dtype),
+    ).item()
+
+    detections = non_max_suppression(
+        raw_predictions,
+        conf_thres=nms_threshold,
+    )
+
+    scores = []
+    for image_detections in detections:
+        retained = image_detections[image_detections[:, 4] >= threshold]
+
+        if len(retained) == 0:
+            scores.append(raw_predictions.new_tensor(0.0))
+        else:
+            scores.append(retained[:, 4].mean())
+
+    return torch.stack(scores)
 
 
 def object_region_mask(
