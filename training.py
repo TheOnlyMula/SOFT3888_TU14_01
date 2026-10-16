@@ -26,6 +26,8 @@ from dataset_loader import (
 from distillation import (
     DISTILL_MODES,
     MASK_ENLARGEMENT,
+    TEACHER_CONFIDENCE_THRESHOLD,
+    teacher_confidence,
     distilled_features,
     feature_distillation_loss,
     load_teacher,
@@ -196,6 +198,10 @@ def train_model(
                 loss, loss_items = model.loss(student_batch, student_preds)
                 with torch.no_grad():
                     teacher_preds = teacher(batch_data["img"])
+                    teacher_confidences = teacher_confidence(
+                        teacher_preds,
+                        threshold=TEACHER_CONFIDENCE_THRESHOLD,
+                    )
                 if distill_mode == "object":
                     mask = object_region_mask(
                         batch_data["batch_idx"],
@@ -602,6 +608,9 @@ def main(role: str, rgb_only: bool) -> None:
         'Teacher Checkpoint': str(args.teacher_checkpoint) if distilling else None,
         'Lambda Distill': args.lambda_distill if distilling else None,
         'Distill Mode': args.distill_mode if distilling else None,
+        'Teacher Confidence Threshold': (
+            TEACHER_CONFIDENCE_THRESHOLD if distilling else None
+        ),
         'Object Mask Enlargement': MASK_ENLARGEMENT if distilling and args.distill_mode == "object" else None,
         'Training Augmentation': {
             'enabled': args.degradation_augmentation,
