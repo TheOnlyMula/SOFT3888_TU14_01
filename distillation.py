@@ -8,6 +8,8 @@ variant restricts the loss to. This module is training-only: inference never imp
 import logging
 from pathlib import Path
 
+import math
+
 import torch
 import torch.nn.functional as F
 
@@ -65,7 +67,7 @@ def teacher_confidence(
 ) -> torch.Tensor:
     """Mean confidence of the teacher's retained detections for each image.
 
-    Detections below ``threshold`` are discarded. Images with no retained
+    Detections at or above threshold are retained. Images with no retained
     detections receive confidence 0.
     """
     raw_predictions = (
@@ -74,17 +76,21 @@ def teacher_confidence(
         else teacher_preds
     )
 
+    nms_threshold = math.nextafter(threshold, -math.inf)
+
     detections = non_max_suppression(
         raw_predictions,
-        conf_thres=threshold,
+        conf_thres=nms_threshold,
     )
 
     scores = []
     for image_detections in detections:
-        if len(image_detections) == 0:
+        retained = image_detections[image_detections[:, 4] >= threshold]
+
+        if len(retained) == 0:
             scores.append(raw_predictions.new_tensor(0.0))
         else:
-            scores.append(image_detections[:, 4].mean())
+            scores.append(retained[:, 4].mean())
 
     return torch.stack(scores)
 
