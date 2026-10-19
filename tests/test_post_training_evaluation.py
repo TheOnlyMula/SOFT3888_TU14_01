@@ -323,7 +323,7 @@ class PostTrainingEvaluationTests(unittest.TestCase):
             validated_weights.append(model.weight.detach().clone())
             return next(validation_results)
 
-        with patch("training.validate_model", side_effect=validate_and_record):
+        with patch("training.loop.validate_model", side_effect=validate_and_record):
             path = train_model(
                 loader,
                 loader,
@@ -360,7 +360,7 @@ class PostTrainingEvaluationTests(unittest.TestCase):
 
         optimiser = RecordingSGD(self.model.parameters(), lr=0.1)
         self.checkpoint.unlink()
-        with patch("training.validate_model", return_value=val_results(1.0, map50_95=0.5)):
+        with patch("training.loop.validate_model", return_value=val_results(1.0, map50_95=0.5)):
             train_model(
                 loader,
                 loader,
@@ -392,8 +392,8 @@ class PostTrainingEvaluationTests(unittest.TestCase):
             self.assertAlmostEqual(actual, expected, places=7)
         # Then the linear schedule alone sets the rate for the second of 2 epochs
         for actual in step_lrs[4:]:
-            self.assertAlmostEqual(actual, 0.1 * training.lr_factor(1, 2), places=7)
-        self.assertAlmostEqual(training.lr_factor(1, 2), 0.505)
+            self.assertAlmostEqual(actual, 0.1 * training.schedule.lr_factor(1, 2), places=7)
+        self.assertAlmostEqual(training.schedule.lr_factor(1, 2), 0.505)
 
     def test_warmup_never_covers_the_final_epoch(self):
         # A 3-epoch warmup in a 2-epoch run is cut to 1 epoch, as in Ultralytics
@@ -401,7 +401,7 @@ class PostTrainingEvaluationTests(unittest.TestCase):
             batches=4, nominal_batch_size=4, warmup_epochs=3
         )
         self.assertAlmostEqual(step_lrs[3], 0.075, places=7)
-        self.assertAlmostEqual(step_lrs[4], 0.1 * training.lr_factor(1, 2), places=7)
+        self.assertAlmostEqual(step_lrs[4], 0.1 * training.schedule.lr_factor(1, 2), places=7)
 
     def test_training_map_improvement_overwrites_previous_best(self):
         self.checkpoint.unlink()
@@ -418,7 +418,7 @@ class PostTrainingEvaluationTests(unittest.TestCase):
             validated_weights.append(model.weight.detach().clone())
             return next(validation_results)
 
-        with patch("training.validate_model", side_effect=validate_and_record):
+        with patch("training.loop.validate_model", side_effect=validate_and_record):
             train_model(
                 loader,
                 loader,
@@ -440,7 +440,7 @@ class PostTrainingEvaluationTests(unittest.TestCase):
         loader = make_loader(4)
         optimiser = torch.optim.SGD(self.model.parameters(), lr=0.1)
         with patch(
-            "training.validate_model",
+            "training.loop.validate_model",
             return_value=val_results(float("nan")),
         ):
             with self.assertRaisesRegex(ValueError, "validation loss"):
@@ -469,7 +469,7 @@ class PostTrainingEvaluationTests(unittest.TestCase):
         logger = MagicMock()
         with (
             unittest.mock.patch.multiple(
-                training,
+                training.run,
                 select_device=MagicMock(return_value=self.device),
                 create_dataloaders=MagicMock(
                     side_effect=lambda **kwargs: (
@@ -506,11 +506,11 @@ class PostTrainingEvaluationTests(unittest.TestCase):
                 ),
             ),
             patch.object(
-                training.log, "create_log_directory", return_value=self.directory
+                training.run.log, "create_log_directory", return_value=self.directory
             ) as self.create_log_directory,
-            patch.object(training.log, "create_logger", return_value=logger),
-            patch.object(training.log, "log_command") as self.log_command,
-            patch.object(training.log, "log_model_config"),
+            patch.object(training.run.log, "create_logger", return_value=logger),
+            patch.object(training.run.log, "log_command") as self.log_command,
+            patch.object(training.run.log, "log_model_config"),
             patch(
                 "sys.argv",
                 argv or ["train_rgb_student.py", "--dataset-path", "fake", *extra_args],
@@ -589,7 +589,7 @@ class PostTrainingEvaluationTests(unittest.TestCase):
         # Epoch 1 finishes and is saved; the run dies while validating epoch 2
         optimiser = torch.optim.SGD(self.model.parameters(), lr=0.1)
         with patch(
-            "training.validate_model",
+            "training.loop.validate_model",
             side_effect=[val_results(1.0, map50_95=0.5), RuntimeError("power cut")],
         ):
             with self.assertRaises(RuntimeError):
@@ -600,7 +600,7 @@ class PostTrainingEvaluationTests(unittest.TestCase):
         model = BatchLossModel()
         optimiser = torch.optim.SGD(model.parameters(), lr=0.1)
         with patch(
-            "training.validate_model",
+            "training.loop.validate_model",
             side_effect=[val_results(1.0, map50_95=0.4), val_results(1.0, map50_95=0.6)],
         ) as validate:
             train_model(loader, loader, model, optimiser, self.device, self.logger, **settings)

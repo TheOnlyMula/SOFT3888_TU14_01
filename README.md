@@ -10,7 +10,14 @@ Our capstone project for SOFT3888 aims to address the drawbacks of RGB cameras i
 SOFT3888_TU14_01/
 ├── README.md
 ├── dataset_loader.py
-├── training.py
+├── training/
+│   ├── __init__.py
+│   ├── cli.py
+│   ├── run.py
+│   ├── loop.py
+│   ├── losses.py
+│   ├── schedule.py
+│   └── reporting.py
 ├── distillation.py
 ├── train_distilled_student.py
 ├── train_rgb_student.py
@@ -59,9 +66,20 @@ Training-time augmentation, used by every model so student comparisons stay matc
 
 Pixels uncovered by the zoom or shift are grey (114) in RGB and 0 in the event channels, since any other event value would invent events. Boxes that end up mostly outside the image, or cut into slivers more than 100 times longer than wide, are dropped. Every sample makes the same random draws with or without events, so for the same `--seed` the RGB student and the distilled student see identical augmented RGB.
 
-### training.py
+### training/
 
-The shared training pipeline used by both models. It:
+The shared training pipeline used by both models. The entry scripts import `main` from the package; its modules follow the order a run happens in:
+
+| Module | Contents |
+| --- | --- |
+| `cli.py` | `parse_args` and `--resume` handling |
+| `run.py` | `main()`: builds the data, models and optimiser from the arguments, writes `config.yaml`, trains, then tests |
+| `loop.py` | `train_model()`: epochs, gradient accumulation, optimiser steps, validation and best-checkpoint selection |
+| `losses.py` | `batch_losses()`: one batch's detection loss and, with a teacher, its distillation loss for each `--distill-mode` |
+| `schedule.py` | warmup constants, `lr_factor` and `apply_warmup` (Ultralytics' schedule) |
+| `reporting.py` | each epoch's `train.log` summary, its `results.csv` row and the quality-weight statistics |
+
+The pipeline:
 
 - builds a DSEC RGB dataloader for train/validation splits,
 - initialises a YOLO model from the pretrained `yolo26n.pt` checkpoint,
@@ -79,22 +97,50 @@ Trains the RGB student with feature distillation from a frozen RGB + event teach
 
 ```bash
 python train_distilled_student.py   --dataset-path dataset   --epochs 50   --teacher-checkpoint runs/teacher/exp_xxx/best_teacher_yolo.pt   --lambda-distill 1.0   --distill-mode object
+
+# Same run with each image's object-aware loss scaled by the quality weight w
+python train_distilled_student.py   --dataset-path dataset   --epochs 50   --teacher-checkpoint runs/teacher/exp_xxx/best_teacher_yolo.pt   --lambda-distill 1.0   --distill-mode object-quality
 ```
 
 The distillation loss is the smooth L1 distance between the student's and the frozen teacher's one-to-many P3 neck features (stride 8). Student and teacher share an architecture, so the features match without a projection layer. `--distill-mode` chooses where it is applied:
 
 - `unweighted` (default, the baseline): every spatial location counts equally.
 - `object`: only the labelled objects count (proposal eq. 2). Each image's boxes, after augmentation, are enlarged by `MASK_ENLARGEMENT` (1.2) about their centres and marked on the feature grid; the distance is averaged over those cells. Images without objects add no distillation loss. With a mask covering everything, this equals the unweighted loss, so one `--lambda-distill` serves both modes.
+- `object-quality`: `object` with each image's loss multiplied by the deterministic quality weight `w = clip(s_e * c_t, 0, 1)` (proposal eq. 3), so unreliable event windows and unsure teacher outputs supervise the student less. `w` is the only difference between the two modes: with every `w = 1` they train identically.
 
-The mask is built in the training step only and is never part of evaluation or inference. Each epoch logs `distill_loss`, the mode and the weighted contribution to the total loss; `config.yaml` records the distillation mode, mask enlargement, and teacher confidence threshold.
+#### Quality weight (`object-quality` mode)
 
-`distillation.event_density(teacher_images)` computes a score for each frame from the same 5-channel input tensor passed to the teacher, whose event channels contain the causal 50 ms histogram. Coverage uses the whole frame: a pixel is active if either event polarity is positive, and each pixel counts once. The score is `clamp(active_pixels / (height * width) / reference, 0, 1)`. The fixed reference is loaded once per process from `docs/event_density_reference.json`; an explicit `reference` argument can also be supplied. It is separate from the per-pixel count scale `EVENT_SCALE_K`. No events gives 0; coverage at or above the reference gives 1. This helper does not yet apply quality weighting to the training loss.
+For each training image `i`, `distillation.quality_weight` combines:
+
+- `s_e`, the normalised event density: `event_density` of the teacher's 5-channel input (described below).
+- `c_t`, the mean teacher confidence over its retained detections: `teacher_confidence` averages the confidence of the frozen teacher's end-to-end detections at or above `TEACHER_CONFIDENCE_THRESHOLD` (0.25). An image with no retained detection gets `c_t = 0`. The training step computes `c_t` once per batch from the same teacher forward pass used for distillation, in every distillation mode, and `object-quality` reuses it.
+- `w_i = clip(s_e * c_t, 0, 1)`, which always lies in [0, 1]. An empty event window or a teacher that detects nothing confidently gives `w_i = 0`.
+
+`w` is computed and applied only in `object-quality` mode. It is detached and has no parameters: nothing in it is learned and no gradient flows through it, so an image with `w_i = 0` sends no distillation gradient to the student (its detection loss still trains as normal). The batch distillation loss is
+
+```
+L_distill = (1 / B) * sum_i  w_i * L_distill_i
+```
+
+where `L_distill_i` is image `i`'s object-aware loss and `B` is the number of images in the batch (`distillation.quality_weighted_loss`). The mean runs over every image, including those with `w_i = 0`, so down-weighting an image lowers the batch loss rather than handing its share to the other images. This loss then enters the total loss as `lambda_distill * L_distill` (proposal eq. 1), exactly as in the other modes.
+
+Each epoch adds the mean, minimum and maximum `w` over that epoch's training images, and the fraction of images with `w = 0`, to `train.log`:
+
+```
+  train quality_weight mean = 0.4120 min = 0.0000 max = 0.9310 zero_fraction = 0.0850
+```
+
+and to `results.csv` as `train/quality_weight_mean`, `train/quality_weight_min`, `train/quality_weight_max` and `train/quality_weight_zero_fraction`. These columns appear only in `object-quality` runs and are not drawn in `results.png`. This mode needs `docs/event_density_reference.json` (see below) and stops before training if it is missing.
+
+The mask and the quality weight are built in the training step only and are never part of evaluation or inference. Each epoch logs `distill_loss`, the mode and the weighted contribution to the total loss; `config.yaml` records the distillation mode, the teacher confidence threshold, the mask enlargement (`object` and `object-quality`) and the event-density reference (`object-quality`).
+
+`distillation.event_density(teacher_images)` computes a score for each frame from the same 5-channel input tensor passed to the teacher, whose event channels contain the causal 50 ms histogram. Coverage uses the whole frame: a pixel is active if either event polarity is positive, and each pixel counts once. The score is `clamp(active_pixels / (height * width) / reference, 0, 1)`. The fixed reference is loaded once per process from `docs/event_density_reference.json`; an explicit `reference` argument can also be supplied. It is separate from the per-pixel count scale `EVENT_SCALE_K`. No events gives 0; coverage at or above the reference gives 1. This score is `s_e` in the `object-quality` quality weight.
 
 Before final training, run `python tools/measure_event_density.py --dataset-path /path/to/DSEC` once. The tool creates `docs/event_density_reference.json` locally; this generated file is ignored by Git and should be retained with the training artifacts, rather than committed. The script requires all 41 configured training sequences, reads every training frame without augmentation, and uses the 90th percentile of whole-frame coverage (including empty frames), with linear percentile interpolation. It rejects validation/test splits and refuses to overwrite an existing JSON. Training and testing reuse the frozen reference; they never regenerate it. No reference config is supplied in this change. Boundary tests are deferred to a separate task.
 
 ### train_rgb_student.py and train_teacher.py
 
-Thin entry points into `training.py`. The two models are trained identically; the only difference is the input:
+Thin entry points into the `training` package. The two models are trained identically; the only difference is the input:
 
 - `train_rgb_student.py`: 3 channels (RGB).
 - `train_teacher.py`: 5 channels (RGB + 2-channel event histogram).

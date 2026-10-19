@@ -145,12 +145,12 @@ class AugmentationSeedTests(unittest.TestCase):
                 with (
                     patch('sys.argv', argv),
                     patch('dataset_loader.DSECDet', return_value=FakeRGBFrames()),
-                    patch('training.log.create_log_directory', return_value=Path(directory)),
-                    patch('training.log.create_logger', return_value=MagicMock()),
-                    patch('training.select_device', return_value='cpu'),
-                    patch('training.extract_trainable_model'),
-                    patch('training.create_optimiser'),
-                    patch('training.train_model') as train,
+                    patch('training.run.log.create_log_directory', return_value=Path(directory)),
+                    patch('training.run.log.create_logger', return_value=MagicMock()),
+                    patch('training.run.select_device', return_value='cpu'),
+                    patch('training.run.extract_trainable_model'),
+                    patch('training.run.create_optimiser'),
+                    patch('training.run.train_model') as train,
                 ):
                     training.main('student', rgb_only=True)
                 saved = yaml.safe_load((Path(directory) / 'config.yaml').read_text())

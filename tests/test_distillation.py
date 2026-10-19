@@ -117,17 +117,17 @@ class DistillationSeedTests(unittest.TestCase):
 
         loader = MagicMock()
         with tempfile.TemporaryDirectory() as directory, patch.multiple(
-            training,
+            training.run,
             select_device=MagicMock(return_value=torch.device("cpu")),
             create_dataloaders=MagicMock(return_value=(loader, loader)),
             extract_trainable_model=MagicMock(side_effect=build_student),
             load_teacher=MagicMock(side_effect=build_teacher),
             create_optimiser=MagicMock(),
             train_model=MagicMock(return_value=Path(directory) / "best.pt"),
-        ), patch.object(training.log, "create_log_directory", return_value=Path(directory)), \
-                patch.object(training.log, "create_logger", return_value=MagicMock()), \
-                patch.object(training.log, "log_command"), \
-                patch.object(training.log, "log_model_config"), \
+        ), patch.object(training.run.log, "create_log_directory", return_value=Path(directory)), \
+                patch.object(training.run.log, "create_logger", return_value=MagicMock()), \
+                patch.object(training.run.log, "log_command"), \
+                patch.object(training.run.log, "log_model_config"), \
                 patch("sys.argv", ["train", "--dataset-path", "fake", "--skip-test", *extra_args]):
             training.main(role=role, rgb_only=True)
         return draws[0]
@@ -282,14 +282,14 @@ class DistillModeOptionTests(unittest.TestCase):
         loader = MagicMock()
         train = MagicMock(return_value=Path("best.pt"))
         with tempfile.TemporaryDirectory() as directory, patch.multiple(
-            training,
+            training.run,
             select_device=MagicMock(return_value=torch.device("cpu")),
             create_dataloaders=MagicMock(return_value=(loader, loader)),
             extract_trainable_model=MagicMock(),
             load_teacher=MagicMock(),
             create_optimiser=MagicMock(),
             train_model=train,
-        ), patch.object(training.log, "create_log_directory", return_value=Path(directory)),                 patch.object(training.log, "create_logger", return_value=MagicMock()),                 patch.object(training.log, "log_command"),                 patch.object(training.log, "log_model_config") as log_config,                 patch("sys.argv", ["train", "--dataset-path", "fake", "--skip-test",
+        ), patch.object(training.run.log, "create_log_directory", return_value=Path(directory)),                 patch.object(training.run.log, "create_logger", return_value=MagicMock()),                 patch.object(training.run.log, "log_command"),                 patch.object(training.run.log, "log_model_config") as log_config,                 patch("sys.argv", ["train", "--dataset-path", "fake", "--skip-test",
                                    "--teacher-checkpoint", "t.pt", "--distill-mode", "object"]):
             training.main(role="distill", rgb_only=True)
         config = log_config.call_args.args[0]
@@ -317,7 +317,7 @@ class ObjectDistillationTrainingTests(unittest.TestCase):
         teacher_before = {k: v.clone() for k, v in teacher.state_dict().items()}
         student_before = {k: v.clone() for k, v in student.state_dict().items()}
 
-        with tempfile.TemporaryDirectory() as directory,                 patch("training.validate_model", return_value=val_results(1.0, map50_95=0.1)),                 patch("training.object_distillation_loss", wraps=training.object_distillation_loss) as masked,                 patch("training.feature_distillation_loss", wraps=training.feature_distillation_loss) as unweighted:
+        with tempfile.TemporaryDirectory() as directory,                 patch("training.loop.validate_model", return_value=val_results(1.0, map50_95=0.1)),                 patch("training.losses.object_distillation_loss", wraps=training.losses.object_distillation_loss) as masked,                 patch("training.losses.feature_distillation_loss", wraps=training.losses.feature_distillation_loss) as unweighted:
             training.train_model(
                 loader, loader, student, torch.optim.SGD(student.parameters(), lr=0.01), torch.device("cpu"),
                 MagicMock(), total_epochs=1, checkpoint_path=Path(directory) / "best.pt",

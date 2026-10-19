@@ -51,12 +51,12 @@ class AugmentationIsolationTests(unittest.TestCase):
             runs[-1]['test'] = list(test_loader)
 
         with (
-            patch('training.log'),
-            patch('training.select_device', return_value=torch.device('cpu')),
-            patch('training.extract_trainable_model'),
-            patch('training.create_optimiser'),
-            patch('training.train_model', side_effect=train),
-            patch('training.evaluate_test_model', side_effect=evaluate),
+            patch('training.run.log'),
+            patch('training.run.select_device', return_value=torch.device('cpu')),
+            patch('training.run.extract_trainable_model'),
+            patch('training.run.create_optimiser'),
+            patch('training.run.train_model', side_effect=train),
+            patch('training.run.evaluate_test_model', side_effect=evaluate),
         ):
             for shares in (None, ('0', '1', '0'), ('0', '0', '1')):
                 argv = ['train', '--dataset-path', 'fake', '--batch-size', '2', '--epochs', '2']
