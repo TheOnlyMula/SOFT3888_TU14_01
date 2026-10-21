@@ -1,0 +1,9 @@
+# Object-aware distillation without quality weighting
+#   python train_distilled_student.py --config configs/object_distillation.yaml --dataset-path DATASET --num-workers N
+# Benchmark report name: object_distillation
+epochs: 25
+batch_size: 6
+seed: 0
+teacher_checkpoint: checkpoints/teacher.pt  # the frozen teacher (see teacher.yaml)
+lambda_distill: 1.0
+distill_mode: object

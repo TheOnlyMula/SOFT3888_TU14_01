@@ -1,4 +1,4 @@
-"""Unit tests for overexposure.py (Issue #41).
+"""Unit tests for degradation/overexposure.py.
 
 Run from the repository root:
     python -m unittest discover -s tests -p "test_overexposure.py" -v
@@ -8,12 +8,8 @@ import unittest
 
 import numpy as np
 
-from overexposure import (
-    MAX_BRIGHTNESS_OFFSET,
-    MIN_GAMMA,
-    STRENGTH_LEVELS,
-    overexpose,
-)
+from degradation.overexposure import MAX_BRIGHTNESS_OFFSET, MIN_GAMMA, overexpose
+from degradation.strength import STRENGTH_LEVELS
 
 
 def ramp_image() -> np.ndarray:
@@ -38,7 +34,7 @@ class TestPresets(unittest.TestCase):
     def test_named_levels_match_readme_table(self):
         self.assertEqual(STRENGTH_LEVELS, {"mild": 0.35, "strong": 1.0})
         self.assertEqual(MIN_GAMMA, 0.4)
-        self.assertEqual(MAX_BRIGHTNESS_OFFSET, 0.6)
+        self.assertEqual(MAX_BRIGHTNESS_OFFSET, 0.4)
 
     def test_named_level_equals_its_numeric_value(self):
         image = random_image()
@@ -61,16 +57,16 @@ class TestFormula(unittest.TestCase):
 
     def test_known_values_strong(self):
         output = overexpose(ramp_image(), "strong")[0, :, 0]
-        self.assertEqual(output[0], 153)  # Black is lifted by the 0.6 offset.
-        self.assertEqual(output[25], 254)
-        # x ** 0.4 + 0.6 >= 1 once x >= 0.4 ** 2.5 (about pixel 25.8).
-        self.assertTrue(np.all(output[26:] == 255))
+        self.assertEqual(output[0], 102)  # Black is lifted by the 0.4 offset.
+        self.assertEqual(output[70], 254)
+        # x ** 0.4 + 0.4 rounds to 255 from about x = 0.6 ** 2.5 (pixel 71).
+        self.assertTrue(np.all(output[71:] == 255))
 
     def test_known_values_mild(self):
         output = overexpose(ramp_image(), "mild")[0, :, 0]
-        self.assertEqual(output[0], 54)  # round(0.21 * 255)
-        self.assertEqual(output[188], 254)
-        self.assertTrue(np.all(output[189:] == 255))
+        self.assertEqual(output[0], 36)  # round(0.14 * 255)
+        self.assertEqual(output[210], 254)
+        self.assertTrue(np.all(output[211:] == 255))
 
     def test_white_stays_white(self):
         image = np.full((4, 4, 3), 255, dtype=np.uint8)

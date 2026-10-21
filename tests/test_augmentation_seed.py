@@ -12,10 +12,8 @@ import torch
 from torch.utils.data import DataLoader
 import yaml
 
-from dataset_loader import (
-    DSECFusionDataset, DEFAULT_DEGRADATION_SHARES, validate_augmentation_seed,
-    yolo_collate_fn,
-)
+from loaders.dataset_loader import DSECFusionDataset, yolo_collate_fn
+from degradation.conditions import DEFAULT_DEGRADATION_SHARES, validate_augmentation_seed
 import training
 
 
@@ -37,7 +35,7 @@ class FakeRGBFrames:
 
 
 def augmented_dataset(seed=42, evaluation_seed=0, **kwargs):
-    with patch('dataset_loader.DSECDet', return_value=FakeRGBFrames()):
+    with patch('loaders.dataset_loader.DSECDet', return_value=FakeRGBFrames()):
         return DSECFusionDataset(
             'fake', rgb_only=True, augmentation_shares=DEFAULT_DEGRADATION_SHARES,
             augmentation_seed=seed, evaluation_seed=evaluation_seed, **kwargs)
@@ -83,7 +81,7 @@ class AugmentationSeedTests(unittest.TestCase):
 
     def test_evaluation_images_ignore_augmentation_seed(self):
         def evaluation_image(augmentation_seed, evaluation_seed):
-            with patch('dataset_loader.DSECDet', return_value=FakeRGBFrames()):
+            with patch('loaders.dataset_loader.DSECDet', return_value=FakeRGBFrames()):
                 dataset = DSECFusionDataset(
                     'fake', split='test', rgb_only=True, degradation='dark',
                     augmentation_seed=augmentation_seed, evaluation_seed=evaluation_seed)
@@ -144,7 +142,7 @@ class AugmentationSeedTests(unittest.TestCase):
                         dark_strength_range=[0.2, 0.4], overexposed_strength_range=[0.6, 0.9], seed=123)
                 with (
                     patch('sys.argv', argv),
-                    patch('dataset_loader.DSECDet', return_value=FakeRGBFrames()),
+                    patch('loaders.dataset_loader.DSECDet', return_value=FakeRGBFrames()),
                     patch('training.run.log.create_log_directory', return_value=Path(directory)),
                     patch('training.run.log.create_logger', return_value=MagicMock()),
                     patch('training.run.select_device', return_value='cpu'),

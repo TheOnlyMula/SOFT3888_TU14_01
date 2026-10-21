@@ -12,14 +12,31 @@ def format_duration(seconds: float) -> str:
     return f"{hours}h{minutes:02d}m{seconds:02d}s" if hours else f"{minutes}m{seconds:02d}s"
 
 
-def quality_weight_stats(quality_weights: list[torch.Tensor]) -> dict:
+def quality_rows(epoch: int, event_windows: dict, quality: dict) -> list[dict]:
+    """One quality_weights.csv row per image of an "object-quality" batch: its frame, s_e, c_t, w."""
+    return [
+        {
+            "epoch": epoch, "sequence": sequence, "frame": frame,
+            "event_density": s_e, "teacher_confidence": c_t, "quality_weight": w,
+        }
+        for sequence, frame, s_e, c_t, w in zip(
+            event_windows["sequence"],
+            event_windows["frame"].tolist(),
+            quality["s_e"].tolist(),
+            quality["c_t"].tolist(),
+            quality["w"].tolist(),
+        )
+    ]
+
+
+def quality_weight_stats(rows: list[dict]) -> dict:
     """Mean, minimum and maximum w over an epoch's training images, and the fraction with w = 0.
 
-    Empty when no weights were collected, i.e. outside "object-quality" mode.
+    Empty when no rows were collected, i.e. outside "object-quality" mode.
     """
-    if not quality_weights:
+    if not rows:
         return {}
-    weights = torch.cat(quality_weights)
+    weights = torch.tensor([row["quality_weight"] for row in rows])
     return {
         "mean": weights.mean().item(),
         "min": weights.min().item(),
@@ -64,12 +81,11 @@ def log_epoch_summary(
             weight_stats["zero_fraction"],
         )
     logger.info(
-        "  val   precision = %.4f recall = %.4f mAP50 = %.4f mAP50-95 = %.4f agnostic_mAP50 = %.4f",
+        "  val   precision = %.4f recall = %.4f mAP50 = %.4f mAP50-95 = %.4f",
         val_results["precision"],
         val_results["recall"],
         val_results["map50"],
         val_results["map50_95"],
-        val_results["agnostic_map50"],
     )
 
 
@@ -91,8 +107,6 @@ def results_row(
         "metrics/mAP50": val_results["map50"],
         "metrics/mAP50-95": val_results["map50_95"],
     })
-    if distilling:
-        row["metrics/agnostic_mAP50"] = val_results["agnostic_map50"]
     row.update({f"val/{name}": val_results[name] for name in LOSS_NAMES})
     row["lr"] = lr
     return row

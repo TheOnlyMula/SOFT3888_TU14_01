@@ -14,7 +14,8 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import overexposure
+from degradation import overexposure
+from degradation.strength import STRENGTH_LEVELS
 
 
 def measurements(image):
@@ -73,7 +74,7 @@ def main():
         "image_sha256": hashlib.sha256(image_bytes).hexdigest(),
         "shape": list(rgb.shape),
         "module_sha256": hashlib.sha256(Path(overexposure.__file__).read_bytes()).hexdigest(),
-        "strength_levels": overexposure.STRENGTH_LEVELS,
+        "strength_levels": STRENGTH_LEVELS,
         "min_gamma": overexposure.MIN_GAMMA,
         "max_brightness_offset": overexposure.MAX_BRIGHTNESS_OFFSET,
         "fully_saturated_definition": "All three RGB channels equal 255; denominator is every pixel",

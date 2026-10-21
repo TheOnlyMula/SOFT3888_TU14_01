@@ -14,6 +14,7 @@ EXPECTED_MODELS = (
     "rgb_baseline",
     "rgb_augmented",
     "naive_distillation",
+    "object_distillation",
     "proposed_event",
     "teacher",
 )
@@ -60,7 +61,7 @@ def build_report(
 ) -> dict:
     """Record evaluation inputs and observed metrics without changing the evaluator."""
     checkpoint_path = checkpoint_path.absolute()
-    root = code_root or Path(__file__).resolve().parent
+    root = code_root or Path(__file__).resolve().parents[1]
     commit = _git_output(root, "rev-parse", "HEAD")
     status = _git_output(root, "status", "--porcelain")
     return {

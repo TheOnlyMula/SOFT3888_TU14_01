@@ -5,11 +5,11 @@ from unittest.mock import patch
 
 from torch.utils.data import SequentialSampler
 
-import overfit
+from training import overfit
 
 
 class OverfitTests(unittest.TestCase):
-    @patch("overfit.DSECFusionDataset", return_value=list(range(100)))
+    @patch("training.overfit.DSECFusionDataset", return_value=list(range(100)))
     def test_tiny_loader_uses_fixed_training_frames(self, dataset_class):
         loader = overfit.tiny_loader(Path("data"), num_samples=8, batch_size=4)
 
@@ -18,11 +18,11 @@ class OverfitTests(unittest.TestCase):
         self.assertIsInstance(loader.sampler, SequentialSampler)
         self.assertEqual(loader.batch_size, 4)
 
-    @patch("overfit.train_model")
-    @patch("overfit.create_optimiser")
-    @patch("overfit.extract_trainable_model")
-    @patch("overfit.log")
-    @patch("overfit.tiny_loader")
+    @patch("training.overfit.train_model")
+    @patch("training.overfit.create_optimiser")
+    @patch("training.overfit.extract_trainable_model")
+    @patch("training.overfit.log")
+    @patch("training.overfit.tiny_loader")
     def test_trains_and_validates_on_the_same_loader(self, tiny_loader, *_):
         argv = ["overfit.py", "--dataset-path", "data", "--epochs", "50"]
         with patch.object(sys, "argv", argv):

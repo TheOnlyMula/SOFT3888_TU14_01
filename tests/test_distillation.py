@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import torch
 
 import training
-from distillation import (
+from training.distillation import (
     MASK_ENLARGEMENT,
     object_distillation_loss,
     object_region_mask,
@@ -16,7 +16,7 @@ from distillation import (
     head_outputs,
     load_teacher,
 )
-from utils import build_model
+from utils.model import build_model
 
 
 def predictions(values, key=DISTILL_TARGET):
@@ -88,7 +88,7 @@ class LoadTeacherTests(unittest.TestCase):
             load_teacher(self.checkpoint, torch.device("cpu"), self.logger)
         self.logger.error.assert_called_once()
 
-    @patch("distillation.build_model")
+    @patch("training.distillation.build_model")
     def test_teacher_is_frozen_and_in_eval_mode(self, build_model):
         model = torch.nn.Linear(2, 2)
         model.train()
@@ -100,6 +100,7 @@ class LoadTeacherTests(unittest.TestCase):
         build_model.assert_called_once_with(5)
         self.assertFalse(teacher.training)
         self.assertFalse(any(parameter.requires_grad for parameter in teacher.parameters()))
+        self.assertTrue(teacher.end2end)  # teacher_confidence reads its end-to-end detections
 
 
 class DistillationSeedTests(unittest.TestCase):
@@ -208,10 +209,11 @@ class ObjectRegionMaskTests(unittest.TestCase):
 
         root = Path(__file__).resolve().parents[1]
         result = subprocess.run(
-            [sys.executable, "-c", "import evaluate, sys; print('distillation' in sys.modules)"],
+            [sys.executable, "-c", "import evaluate, evaluation.metrics, sys; "
+             "print(sorted(m for m in sys.modules if m == 'training' or m.startswith('training.')))"],
             cwd=root, capture_output=True, text=True, check=True,
         )
-        self.assertEqual(result.stdout.strip().splitlines()[-1], "False")
+        self.assertEqual(result.stdout.strip().splitlines()[-1], "[]")
 
 
 def feature_preds(features):
@@ -302,9 +304,9 @@ class ObjectDistillationTrainingTests(unittest.TestCase):
     def test_object_mode_trains_a_real_student_with_the_masked_loss(self):
         from torch.utils.data import DataLoader
 
-        from dataset_loader import yolo_collate_fn
+        from loaders.dataset_loader import yolo_collate_fn
         from test_post_training_evaluation import val_results
-        from utils import extract_trainable_model
+        from utils.model import extract_trainable_model
 
         torch.manual_seed(0)
         samples = [

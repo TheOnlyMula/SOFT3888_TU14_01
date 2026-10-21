@@ -7,7 +7,7 @@ from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
 
-from benchmark_reporting import build_report, compare_reports, save_comparison, save_json
+from evaluation.benchmark_reporting import build_report, compare_reports, save_comparison, save_json
 
 
 def sample_report(name: str, checksum: str) -> dict:
@@ -63,7 +63,7 @@ class BenchmarkReportingTests(unittest.TestCase):
             def parameters(self):
                 return [Parameter(), Parameter()]
 
-        with patch("benchmark_reporting._git_output", side_effect=["abc123", ""]):
+        with patch("evaluation.benchmark_reporting._git_output", side_effect=["abc123", ""]):
             report = build_report(
                 sample_report("rgb_baseline", "unused")["conditions"],
                 model_name="rgb_baseline",
@@ -91,11 +91,11 @@ class BenchmarkReportingTests(unittest.TestCase):
         json_path, csv_path = save_comparison(self.root / "comparison", comparison)
 
         self.assertEqual(json.loads(json_path.read_text(encoding="utf-8"))["missing_models"], [
-            "naive_distillation", "proposed_event", "teacher"
+            "naive_distillation", "object_distillation", "proposed_event", "teacher"
         ])
         with csv_path.open(encoding="utf-8", newline="") as stream:
             rows = list(csv.DictReader(stream))
-        self.assertEqual(len(rows), 15)
+        self.assertEqual(len(rows), 18)  # 6 models x 3 conditions
         self.assertEqual(rows[0]["status"], "measured")
         self.assertEqual(rows[0]["map50"], "0.6")
         self.assertEqual(rows[-1]["status"], "missing")

@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from dataset_loader import DSECFusionDataset, load_causal_events 
+from loaders.dataset_loader import DSECFusionDataset, load_causal_events 
 
 MAX_COUNT = 4096
 

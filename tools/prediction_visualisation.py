@@ -1,4 +1,5 @@
 import argparse
+import sys
 from pathlib import Path
 
 import cv2
@@ -8,9 +9,10 @@ from ultralytics.utils.nms import non_max_suppression
 
 from dsec_det.label import CLASSES
 
-import log
-from dataset_loader import create_rgb_test_loader
-from utils import extract_trainable_model, load_weights, select_device
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from utils import log
+from loaders.dataset_loader import create_rgb_test_loader
+from utils.model import extract_trainable_model, load_weights, select_device
 
 # OpenCV draws in BGR.
 PREDICTION_COLOUR = (0, 0, 255)

@@ -1,0 +1,6 @@
+# RGB-only student 
+#   python train_rgb_student.py --config configs/rgb_baseline.yaml --dataset-path DATASET --num-workers N
+# Benchmark report name: rgb_baseline
+epochs: 25
+batch_size: 6
+seed: 0

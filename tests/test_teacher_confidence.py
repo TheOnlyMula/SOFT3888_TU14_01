@@ -1,4 +1,4 @@
-"""Focused acceptance tests for the teacher-confidence score in Issue #57."""
+"""Tests for the teacher-confidence score c_t in the event-quality weight."""
 
 import tempfile
 import unittest
@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import torch
 import yaml
 
-from distillation import TEACHER_CONFIDENCE_THRESHOLD, teacher_confidence
+from training.distillation import TEACHER_CONFIDENCE_THRESHOLD, teacher_confidence
 
 
 def detections_with_scores(*score_rows):
@@ -65,16 +65,18 @@ class TeacherConfidenceTrainingTests(unittest.TestCase):
         from torch.utils.data import DataLoader
 
         import training
-        from dataset_loader import yolo_collate_fn
-        from utils import build_model, extract_trainable_model
+        from loaders.dataset_loader import yolo_collate_fn
+        from utils.model import build_model, extract_trainable_model
 
         sample = (
             torch.rand(5, 64, 64),
             torch.tensor([[2.0, 0.4, 0.5, 0.3, 0.4]]),
+            {"sequence": "zurich_city_00_a", "frame": 0, "coverage": torch.tensor(0.5)},
         )
         loader = DataLoader([sample], batch_size=1, collate_fn=yolo_collate_fn)
         student = extract_trainable_model(ch=3, weights_path=None, device="cpu")
         teacher = build_model(5).eval().requires_grad_(False)
+        teacher.end2end = True  # as load_teacher sets it
         original_forward = teacher.forward
         original_confidence = training.losses.teacher_confidence
         forward_results = []
@@ -87,19 +89,20 @@ class TeacherConfidenceTrainingTests(unittest.TestCase):
             forward_results.append(result)
             return result
 
-        def record_confidence(predictions, threshold):
-            confidence_calls.append((predictions, torch.is_grad_enabled(), threshold))
-            return original_confidence(predictions, threshold)
+        def record_confidence(predictions, threshold=TEACHER_CONFIDENCE_THRESHOLD):
+            confidence = original_confidence(predictions, threshold)
+            confidence_calls.append((predictions, confidence.requires_grad, threshold))
+            return confidence
 
         validation_results = {
             "loss": 1.0, "box_loss": 0.0, "cls_loss": 0.0, "l1_loss": 0.0,
             "precision": 0.0, "recall": 0.0, "map50": 0.0,
-            "map50_95": 0.1, "agnostic_map50": 0.0,
+            "map50_95": 0.1,
         }
         with tempfile.TemporaryDirectory() as directory, \
                 patch.object(teacher, "forward", side_effect=record_forward) as forward, \
                 patch.object(training.losses, "teacher_confidence", side_effect=record_confidence) as confidence, \
-                patch.object(training.losses, "feature_distillation_loss", wraps=training.losses.feature_distillation_loss) as distillation_loss, \
+                patch.object(training.losses, "object_distillation_loss", wraps=training.losses.object_distillation_loss) as distillation_loss, \
                 patch.object(training.loop, "validate_model", return_value=validation_results):
             training.train_model(
                 loader, loader, student,
@@ -110,6 +113,7 @@ class TeacherConfidenceTrainingTests(unittest.TestCase):
                 latest_path=Path(directory) / "latest.pt",
                 teacher=teacher,
                 lambda_distill=1.0,
+                distill_mode="object-quality",
                 nominal_batch_size=1,
                 warmup_epochs=0,
             )
@@ -120,7 +124,7 @@ class TeacherConfidenceTrainingTests(unittest.TestCase):
         self.assertEqual(distillation_loss.call_count, 1)
         self.assertIs(confidence_calls[0][0], forward_results[0])
         self.assertIs(distillation_loss.call_args.args[1], forward_results[0])
-        self.assertFalse(confidence_calls[0][1])
+        self.assertFalse(confidence_calls[0][1])  # c_t carries no gradient
         self.assertEqual(confidence_calls[0][2], TEACHER_CONFIDENCE_THRESHOLD)
         self.assertTrue(all(parameter.grad is None for parameter in teacher.parameters()))
 

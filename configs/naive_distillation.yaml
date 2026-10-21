@@ -1,0 +1,9 @@
+# Basic unweighted distillation baseline
+#   python train_distilled_student.py --config configs/naive_distillation.yaml --dataset-path DATASET --num-workers N
+# Benchmark report name: naive_distillation
+epochs: 25
+batch_size: 6
+seed: 0
+teacher_checkpoint: checkpoints/teacher.pt  # the frozen teacher (see teacher.yaml)
+lambda_distill: 1.0
+distill_mode: unweighted

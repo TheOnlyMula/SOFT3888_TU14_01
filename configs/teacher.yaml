@@ -1,0 +1,10 @@
+# The privileged RGB + event teacher, reported separately as a training reference 
+#   python train_teacher.py --config configs/teacher.yaml --dataset-path DATASET --num-workers N
+# Once trained, copy its best_teacher_yolo.pt to checkpoints/teacher.pt: the distillation
+# configs all read the frozen teacher from there. Benchmark report name: teacher
+epochs: 25
+batch_size: 6
+seed: 0
+# Modality dropout: blank the RGB of 15% of training images (keeping events and labels), so the
+# teacher must also learn to detect from events
+rgb_dropout: 0.15

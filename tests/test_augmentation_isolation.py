@@ -6,10 +6,10 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import torch
 
-from dataset_loader import (
+from loaders.dataset_loader import (
     DSECFusionDataset, create_rgb_dataloaders, rgb_loader_fingerprint,
 )
-from evaluate import evaluate_degraded_benchmark
+from evaluation.metrics import evaluate_degraded_benchmark
 import training
 
 
@@ -20,7 +20,7 @@ class AugmentationIsolationTests(unittest.TestCase):
         torch_state = torch.random.get_rng_state()
         self.addCleanup(torch.random.set_rng_state, torch_state)
         np.random.seed(42)
-        dataset_patch = patch('dataset_loader.DSECDet')
+        dataset_patch = patch('loaders.dataset_loader.DSECDet')
         self.base = dataset_patch.start().return_value
         self.addCleanup(dataset_patch.stop)
         self.source = (np.arange(192).reshape(8, 8, 3) % 100 + 50).astype(np.uint8)
@@ -98,7 +98,10 @@ class AugmentationIsolationTests(unittest.TestCase):
             logger=MagicMock(), checkpoint_path=Path('unused/best.pt'), rgb_only=True,
             batch_size=2, num_workers=0, degradation_strength=0.35, evaluation_seed=17,
         )
-        with patch('evaluate.evaluate_test_model', return_value=dict(map50=0.5, map50_95=0.3, recall=0.6)):
+        def evaluate(loader, *args, **kwargs):
+            return dict(map50=0.5, map50_95=0.3, recall=0.6, fingerprint=rgb_loader_fingerprint(loader))
+
+        with patch('evaluation.metrics.evaluate_test_model', side_effect=evaluate):
             before = evaluate_degraded_benchmark(**settings)
             train, _ = create_rgb_dataloaders(
                 'fake', MagicMock(), augmentation_shares=(0, 1, 0), dark_strength_range=(0.8, 1))

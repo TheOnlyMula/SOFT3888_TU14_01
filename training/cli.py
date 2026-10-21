@@ -1,21 +1,34 @@
-"""Command-line arguments for a training run, including resuming an interrupted one."""
+"""Command-line arguments for a training run, from a config file and flags, including resuming one."""
 import argparse
 import sys
 from pathlib import Path
 
-import log
-from dataset_loader import (
+import yaml
+
+from utils import log
+from degradation.conditions import (
     DEFAULT_DEGRADATION_SHARES, DEFAULT_STRENGTH_RANGE, DEFAULT_AUGMENTATION_SEED,
     validate_degradation_shares, validate_strength_range, validate_augmentation_seed,
 )
-from distillation import DISTILL_MODES
+from .distillation import DISTILL_MODES
 
 # Settings that may change when resuming: they affect speed and logging, not the training itself
 RESUME_OVERRIDES = ("num_workers", "console_level")
 
 
 def parse_args(description: str) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=description)
+    """Parse a training command, with any --config file's settings applied before its flags.
+
+    The returned settings also hold `config` (the file, or None) and `command`: the full command
+    with the file's settings spelled out as flags, which the run records so it can be resumed
+    without the file.
+    """
+    parser = argparse.ArgumentParser(description=description, allow_abbrev=False)
+    parser.add_argument(
+        "--config", type=Path, default=None,
+        help="YAML file of an experiment's settings (see configs/), keyed by these options' names "
+             "with underscores. Options given on the command line override it.",
+    )
     parser.add_argument(
         "--dataset-path", type=Path, default=None,
         help="DSEC root with labelled train and val directories. Required unless resuming.",
@@ -31,7 +44,8 @@ def parse_args(description: str) -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=1, help="Total number of epochs to train.")
     parser.add_argument(
         "--degradation-augmentation", action="store_true",
-        help="Randomly mix clean, dark and overexposed images for RGB-only student training.",
+        help="Randomly mix clean, dark and overexposed training images. With events (teacher, "
+             "distillation) only the RGB channels are degraded; the events stay clean.",
     )
     parser.add_argument(
         "--augmentation-seed", type=int, default=DEFAULT_AUGMENTATION_SEED,
@@ -51,6 +65,11 @@ def parse_args(description: str) -> argparse.Namespace:
         "--overexposed-strength-range", type=float, nargs=2, metavar=("MIN", "MAX"),
         default=DEFAULT_STRENGTH_RANGE,
         help="Uniform training over-exposure strength range in [0, 1] (default: 0.35 1.0).",
+    )
+    parser.add_argument(
+        "--rgb-dropout", type=float, default=0.0, metavar="P",
+        help="Teacher only (modality dropout): blank the RGB of this share of training images, "
+             "keeping their events and labels, so the teacher also learns to detect from events.",
     )
     parser.add_argument(
         "--skip-test", action="store_true",
@@ -89,8 +108,11 @@ def parse_args(description: str) -> argparse.Namespace:
         choices = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         help = "Set the logging level.",
     )
-    args = parser.parse_args()
+    config, command = expand_config(parser, sys.argv[1:])
+    args = parser.parse_args(command)
     if args.resume is not None:
+        if config is not None:
+            parser.error("--resume takes its settings from the original run, so --config cannot be given")
         args = resumed_args(parser, args)
     elif args.dataset_path is None:
         parser.error("--dataset-path is required unless resuming")
@@ -105,9 +127,38 @@ def parse_args(description: str) -> argparse.Namespace:
         parser.error("--max-samples must be positive")
     if args.lambda_distill < 0:
         parser.error("--lambda-distill must be non-negative")
+    if not 0 <= args.rgb_dropout < 1:
+        parser.error("--rgb-dropout must be a probability in [0, 1)")
     if args.distill_mode != "unweighted" and args.teacher_checkpoint is None:
         parser.error("--distill-mode needs --teacher-checkpoint")
+    args.config = config
+    args.command = [sys.argv[0], *command]
     return args
+
+
+def expand_config(parser: argparse.ArgumentParser, argv: list[str]) -> tuple[Path | None, list[str]]:
+    config_option = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    config_option.add_argument("--config", type=Path)
+    known, rest = config_option.parse_known_args(argv)
+    if known.config is None:
+        return None, argv
+    if not known.config.is_file():
+        parser.error(f"--config: file not found: {known.config}")
+    with open(known.config, encoding="utf-8") as file:
+        settings = yaml.safe_load(file) or {}
+
+    options = []
+    for name, value in settings.items():
+        if name in ("config", "resume"):
+            parser.error(f"{known.config}: '{name}' cannot be set in a config file")
+        flag = "--" + name.replace("_", "-")
+        if isinstance(value, bool):
+            options += [flag] if value else []
+        elif isinstance(value, list):
+            options += [flag, *map(str, value)]
+        else:
+            options += [flag, str(value)]
+    return known.config, options + rest
 
 
 def resumed_args(parser: argparse.ArgumentParser, given: argparse.Namespace) -> argparse.Namespace:

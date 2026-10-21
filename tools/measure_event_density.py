@@ -1,10 +1,10 @@
-"""Measure and freeze whole-frame event coverage on the training split only.
+"""Measure the event-density reference on the training split only.
 
 Usage: python tools/measure_event_density.py --dataset-path DSEC
-The reference is the 90th percentile of frame coverage, including empty frames.
+The reference is the median whole-frame event coverage, including empty frames.
 Every training frame is read, without augmentation; all configured training
-sequences must be available. Existing outputs
-are never replaced; the saved reference is reused by training, not remeasured.
+sequences must be available. The result is recorded in docs/event_density.json and
+copied into training.distillation.EVENT_DENSITY_REFERENCE; training never remeasures it.
 """
 import argparse
 import json
@@ -15,11 +15,18 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from dataset_loader import DSECFusionDataset, EVENT_WINDOW_US, SPLIT_CONFIG_PATH, load_causal_events
+from loaders.dataset_loader import (
+    DSECFusionDataset, EVENT_WINDOW_US, SPLIT_CONFIG_PATH, event_coverage, load_causal_events,
+)
 from dsec_det.io import yaml_file_to_dict
 
 
-DEFAULT_OUTPUT = Path(__file__).resolve().parents[1] / "docs" / "event_density_reference.json"
+DEFAULT_OUTPUT = Path(__file__).resolve().parents[1] / "docs" / "event_density.json"
+
+# The median: a window at least as dense as the typical training frame gets s_e = 1, so the
+# weight only reduces supervision from the sparser windows. The others are recorded for the report.
+REFERENCE_PERCENTILE = 50
+REPORTED_PERCENTILES = (10, 25, 50, 75, 90)
 
 
 def main() -> None:
@@ -48,22 +55,25 @@ def main() -> None:
         histogram = dataset.generate_event_histogram(
             load_causal_events(base, idx), height=base.height, width=base.width
         )
-        active = (histogram > 0).any(dim=0)
-        coverage.append(int(active.sum()) / (base.height * base.width))
+        coverage.append(event_coverage(histogram).item())
         if (idx + 1) % 100 == 0 or idx + 1 == len(base):
             print(f"Read {idx + 1}/{len(base)} training frames", flush=True)
 
-    reference = float(np.percentile(coverage, 90, method="linear"))
+    percentiles = {
+        str(p): round(float(np.percentile(coverage, p, method="linear")), 4) for p in REPORTED_PERCENTILES
+    }
+    reference = percentiles[str(REFERENCE_PERCENTILE)]
     if reference <= 0:
-        parser.error("Training coverage p90 is zero; cannot freeze a positive reference")
+        parser.error("Median training coverage is zero; cannot freeze a positive reference")
     metadata = {
         "measured_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "split": "train",
         "region": "whole_frame",
         "event_window_us": EVENT_WINDOW_US,
-        "percentile": 90,
+        "percentile": REFERENCE_PERCENTILE,
         "percentile_method": "linear",
         "event_density_reference": reference,
+        "percentiles": percentiles,
         "frames_read": len(coverage),
         "all_available_frames": True,
         "sequences": sequences,
@@ -74,7 +84,7 @@ def main() -> None:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("x", encoding="utf-8") as stream:
         stream.write(json.dumps(metadata, indent=2) + "\n")
-    print(f"Frozen reference {reference:.8f} saved to {args.output}")
+    print(f"Reference {reference:.4f} saved to {args.output}; set training.distillation.EVENT_DENSITY_REFERENCE to it")
 
 
 if __name__ == "__main__":

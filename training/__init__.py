@@ -16,6 +16,11 @@ The modules follow the order a run happens in:
     losses     one batch's detection loss and, with a teacher, its distillation loss
     schedule   Ultralytics' warmup and linear learning-rate decay
     reporting  each epoch's summary in train.log and its row in results.csv
+
+with two training-only modules beside them:
+
+    distillation  the frozen teacher, object mask, feature losses and event-quality weight
+    overfit       the tiny-subset overfit check behind overfit.py
 """
 from .cli import parse_args
 from .loop import train_model

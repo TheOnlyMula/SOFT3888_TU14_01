@@ -7,9 +7,9 @@ import cv2
 import numpy as np
 import torch
 
-import augment
-from augment import EVENT_PAD, RGB_PAD, augment_sample
-from dataset_loader import DSECFusionDataset
+from loaders import augment
+from loaders.augment import EVENT_PAD, RGB_PAD, augment_sample
+from loaders.dataset_loader import DSECFusionDataset
 
 HEIGHT, WIDTH = 64, 80
 BOX = np.array([[20.0, 16.0, 44.0, 40.0]])
@@ -28,8 +28,8 @@ def marked_sample():
 def fixed_draws(flip, scale, shift_x, shift_y):
     """Patch augment's random draws: no hue shift, saturation gain 1, then scale and shifts."""
     return (
-        patch("augment.random.random", return_value=0.0 if flip else 1.0),
-        patch("augment.random.uniform", side_effect=[0.0, 1.0, scale, shift_x, shift_y]),
+        patch("loaders.augment.random.random", return_value=0.0 if flip else 1.0),
+        patch("loaders.augment.random.uniform", side_effect=[0.0, 1.0, scale, shift_x, shift_y]),
     )
 
 
@@ -105,7 +105,7 @@ class AugmentSampleTests(unittest.TestCase):
         # Under the old multiplicative formula red (hue 0) never moved while blue did
         red, blue = (255, 0, 0), (0, 0, 255)
         image = np.array([[red, blue]], dtype=np.uint8)
-        with patch("augment.random.uniform", side_effect=[augment.HUE_GAIN, 1.0]):
+        with patch("loaders.augment.random.uniform", side_effect=[augment.HUE_GAIN, 1.0]):
             shifted = augment.jitter_hue_saturation(image)
         red_shift = hue_of(shifted[0, 0]) - hue_of(red)
         blue_shift = hue_of(shifted[0, 1]) - hue_of(blue)
@@ -121,8 +121,8 @@ class AugmentSampleTests(unittest.TestCase):
 
 
 class DatasetAugmentationTests(unittest.TestCase):
-    @patch("dataset_loader.load_causal_events")
-    @patch("dataset_loader.DSECDet")
+    @patch("loaders.dataset_loader.load_causal_events")
+    @patch("loaders.dataset_loader.DSECDet")
     def test_rgb_student_and_teacher_see_the_same_augmented_rgb(self, dataset_class, events):
         base = dataset_class.return_value
         base.get_image.return_value = np.random.default_rng(1).integers(
@@ -141,7 +141,7 @@ class DatasetAugmentationTests(unittest.TestCase):
             self.assertTrue(torch.equal(student_image, teacher_image[:3]))
             self.assertTrue(torch.equal(student_targets, teacher_targets))
 
-    @patch("dataset_loader.DSECDet")
+    @patch("loaders.dataset_loader.DSECDet")
     def test_augmentation_is_off_by_default(self, dataset_class):
         base = dataset_class.return_value
         image = np.random.default_rng(2).integers(0, 256, (HEIGHT, WIDTH, 3), dtype=np.uint8)
