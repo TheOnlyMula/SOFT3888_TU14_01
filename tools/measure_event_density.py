@@ -28,27 +28,15 @@ DEFAULT_OUTPUT = Path(__file__).resolve().parents[1] / "docs" / "event_density.j
 REFERENCE_PERCENTILE = 50
 REPORTED_PERCENTILES = (10, 25, 50, 75, 90)
 
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset-path", type=Path, required=True)
-    parser.add_argument("--split", choices=["train"], default="train")
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
-    args = parser.parse_args()
-    if args.output.exists():
-        parser.error(f"Frozen reference already exists: {args.output}; refusing to overwrite")
-
-    dataset = DSECFusionDataset(args.dataset_path, split="train", rgb_only=False, augment=False)
+def get_event_density_dict(dataset: DSECFusionDataset, output: Path) -> dict:
     base = dataset.base_dataset
     if len(base) == 0:
-        parser.error("No training frames available")
+        raise ValueError("No training frames available")
     sequences = [directory.name for directory in base.subsequence_directories]
     configured = yaml_file_to_dict(SPLIT_CONFIG_PATH)["train"]
     missing = sorted(set(configured) - set(sequences))
     if missing:
-        parser.error(
-            "Complete training split required; missing sequences: " + ", ".join(missing)
-        )
+        raise ValueError("Complete training split required; missing sequences: " + ", ".join(missing))
 
     coverage = []
     for idx in range(len(base)):
@@ -63,8 +51,7 @@ def main() -> None:
         str(p): round(float(np.percentile(coverage, p, method="linear")), 4) for p in REPORTED_PERCENTILES
     }
     reference = percentiles[str(REFERENCE_PERCENTILE)]
-    if reference <= 0:
-        parser.error("Median training coverage is zero; cannot freeze a positive reference")
+    if reference <= 0: raise ValueError("Median training coverage is zero; cannot freeze a positive reference")
     metadata = {
         "measured_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "split": "train",
@@ -81,10 +68,28 @@ def main() -> None:
         "complete_training_split": not missing,
         "augmentation": False,
     }
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    with args.output.open("x", encoding="utf-8") as stream:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("x", encoding="utf-8") as stream:
         stream.write(json.dumps(metadata, indent=2) + "\n")
-    print(f"Reference {reference:.4f} saved to {args.output}; set training.distillation.EVENT_DENSITY_REFERENCE to it")
+    print(f"Reference {reference:.4f} saved to {output}; set training.distillation.EVENT_DENSITY_REFERENCE to it")
+
+    return percentiles
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dataset-path", type=Path, required=True)
+    parser.add_argument("--split", choices=["train"], default="train")
+    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    args = parser.parse_args()
+    if args.output.exists():
+        parser.error(f"Frozen reference already exists: {args.output}; refusing to overwrite")
+
+    try:
+        dataset = DSECFusionDataset(args.dataset_path, split="train", rgb_only=False, augment=False)
+        get_event_density_dict(dataset, args.output)
+    except ValueError as ve:
+        parser.error(str(ve))
 
 
 if __name__ == "__main__":

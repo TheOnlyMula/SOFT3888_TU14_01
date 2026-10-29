@@ -41,7 +41,6 @@ class DarkeningTests(unittest.TestCase):
     def test_invalid_strength_raises_value_error(self):
         with self.assertRaises(ValueError):
             darken(self.image, "invalid_strength", seed=17)
-\
 
     def test_negative_strength_raises_value_error(self):
         with self.assertRaises(ValueError):

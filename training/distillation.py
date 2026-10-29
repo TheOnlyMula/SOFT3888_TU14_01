@@ -7,7 +7,7 @@ variant restricts the loss to, and quality_weight gives each image the determini
 w = clip(s_e * c_t, 0, 1) that the quality-weighted variant scales that loss by. This module is
 training-only: inference never imports it.
 """
-import logging
+import logging, json
 from pathlib import Path
 
 import torch
@@ -31,7 +31,17 @@ TEACHER_CONFIDENCE_THRESHOLD = 0.25
 # Event coverage (loaders.dataset_loader.event_coverage) at which a window counts as fully dense: the median
 # over every training frame, so only windows sparser than the typical frame get s_e < 1. Measured
 # by tools/measure_event_density.py and recorded in docs/event_density.json.
-EVENT_DENSITY_REFERENCE = 0.4353
+# Originally, the event density reference is a hard-coded value that was obtained as above for the full DSEC
+# dataset (0.4353). If docs/event_density.json exists, the event density reference will be the value recorded in the file.
+DEFAULT_EVENT_DENSITY_REFERENCE = 0.4353
+def get_event_density_reference() -> float:
+    try:
+        with open(Path(__file__).resolve().parents[1] / "docs" / "event_density.json") as f:
+            density_json = json.load(f)
+            return density_json["event_density_reference"]
+    except (FileNotFoundError, KeyError) as e:
+        return DEFAULT_EVENT_DENSITY_REFERENCE
+EVENT_DENSITY_REFERENCE = get_event_density_reference()
 
 DISTILL_MODES = ("unweighted", "object", "object-quality")
 
