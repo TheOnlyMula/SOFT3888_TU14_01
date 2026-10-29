@@ -147,7 +147,7 @@ class QualityWeightedLossTests(unittest.TestCase):
 
 class QualityWeightTrainingTests(unittest.TestCase):
     def test_each_epoch_records_every_images_s_e_c_t_and_w(self):
-        from test_post_training_evaluation import val_results
+        from tests.test_post_training_evaluation import val_results
 
         student, teacher = models()
         samples = [
