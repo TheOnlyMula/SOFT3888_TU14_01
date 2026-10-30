@@ -98,8 +98,7 @@ def results_row(
     row = {"epoch": epoch}
     row.update({f"train/{name}": train_results[name] for name in LOSS_NAMES})
     if distilling:
-        row["train/distill_loss"] = train_results["distill_loss"]
-    # No "loss" or "metric" in these names, so plot_results leaves them out of its plot grid
+        row["train/distillation"] = train_results["distill_loss"]
     row.update({f"train/quality_weight_{name}": value for name, value in weight_stats.items()})
     row.update({
         "metrics/precision": val_results["precision"],

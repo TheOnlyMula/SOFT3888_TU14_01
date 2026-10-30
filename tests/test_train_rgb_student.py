@@ -334,6 +334,21 @@ class EpochResultsTests(unittest.TestCase):
             self.assertEqual(float(saved[-1]["train/loss"]), 1.0)
             self.assertTrue((Path(directory) / "results.png").is_file())
 
+    def test_a_distillation_run_draws_its_curves(self):
+        from training.reporting import results_row
+        from utils import log
+
+        val = {"loss": 2.0, "box_loss": 1.0, "cls_loss": 1.0, "l1_loss": 0.0,
+               "precision": 0.5, "recall": 0.4, "map50": 0.4, "map50_95": 0.25}
+        weights = {"mean": 0.5, "min": 0.0, "max": 1.0, "zero_fraction": 0.1}
+        with tempfile.TemporaryDirectory() as directory, \
+                patch("ultralytics.utils.plotting.LOGGER") as ultralytics_logger:
+            for epoch in (1, 2):
+                train = {"loss": 3.0 / epoch, "box_loss": 1.5, "cls_loss": 1.5, "l1_loss": 0.0, "distill_loss": 0.06}
+                log.log_epoch_results(results_row(epoch, train, val, weights, 0.01), Path(directory), MagicMock())
+            self.assertTrue((Path(directory) / "results.png").is_file())
+        ultralytics_logger.error.assert_not_called()
+
     def test_a_plot_that_cannot_be_saved_does_not_stop_training(self):
         # Windows refuses to overwrite results.png while it is open in a viewer
         import csv
