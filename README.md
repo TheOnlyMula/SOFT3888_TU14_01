@@ -37,10 +37,15 @@ SOFT3888_TU14_01/
 ├── tests/                      regression and smoke tests
 ├── tools/                      measurement, example-generation, comparison and visualisation scripts
 ├── environment.yml
-├── yolo26n.pt
-├── DSEC_ROOT/                  labelled DSEC sequences (not in git)
-├── DSEC-det/                   official DSEC detection utilities (not in git)
-└── runs/                       training outputs and logs (not in git)
+│
+│   Not in Git (created during setup, see "Environment setup"):
+├── DSEC-det/                   official DSEC detection utilities, cloned into the project root
+├── yolo26n.pt                  pretrained weights, downloaded automatically on the first run
+├── checkpoints/teacher.pt      the trained teacher, copied here for the distillation configs
+├── runs/                       training outputs and logs
+└── DSEC_ROOT/                  the dataset; may live anywhere, passed with --dataset-path
+    ├── train/                  training and validation sequences
+    └── test/                   test sequences
 ```
 
 ## Core components
@@ -108,6 +113,8 @@ python train_distilled_student.py --config configs/object_distillation.yaml --da
 python train_distilled_student.py --config configs/proposed_event.yaml --dataset-path dataset --num-workers 8
 ```
 
+The distillation configs read the frozen teacher from `checkpoints/teacher.pt`, so train the teacher first and copy its `best_teacher_yolo.pt` there (see [Experiment configs](#experiment-configs)). Distilled runs are saved to `runs/distill/exp_NNN/`, with the best weights in `best_distill_yolo.pt`. Evaluate them with `evaluate.py --type student`, because the distilled student takes RGB input only.
+
 The distillation loss is the smooth L1 distance between the student's and the frozen teacher's one-to-many P3 neck features (stride 8). Student and teacher share an architecture, so the features match without a projection layer. `--distill-mode` chooses where it is applied:
 
 - `unweighted` (default, the baseline): every spatial location counts equally.
@@ -172,73 +179,138 @@ Both accept the same arguments (`--dataset-path`, `--epochs`, `--batch-size`, `-
 
 ## Environment setup
 
-The project expects a Python environment with PyTorch, Ultralytics, OpenCV, and the DSEC dataset utilities. The repository includes an environment file.
+The project needs Python 3.11 (3.10 or newer works), PyTorch, Ultralytics 8.4.128, OpenCV, h5py with `hdf5plugin`, and the DSEC detection utilities. Run every command below from the project root unless a step says otherwise.
+
+### Prerequisites
+
+- Git, and either mamba/conda or Python 3.11 with `venv`.
+- `wget` and `unzip` for the dataset download scripts. macOS does not ship `wget`; install it with `brew install wget`.
+- An internet connection on the first training run, so Ultralytics can download `yolo26n.pt`.
+- An NVIDIA GPU with CUDA for full training runs. Without one, the code falls back to the CPU (including on Apple Silicon Macs). That is enough for the tests and the short smoke run below, but too slow for full training.
 
 ### 1. Clone the repository
 
 ```bash
-git clone <repo-url>
+git clone git@github.sydney.edu.au:SOFT3888-TU14-01/SOFT3888_TU14_01.git
 cd SOFT3888_TU14_01
 ```
 
 ### 2. Create the environment
+
+**Linux or Windows with an NVIDIA GPU (conda/mamba):**
 
 ```bash
 mamba env create -f environment.yml
 mamba activate dsec-env
 ```
 
-If you are using conda instead of mamba, the same environment definition should work with `conda env create -f environment.yml`.
+`conda env create -f environment.yml` and `conda activate dsec-env` work the same way.
 
-For macOS and Linux systems, you may also use a python env using the following process:
+**macOS, or any machine without an NVIDIA GPU (venv + pip):**
+
+`environment.yml` pins `pytorch-cuda=12.1`, which does not exist for macOS, so `mamba env create` fails there with `pytorch-cuda =12.1 * does not exist`. Use a virtual environment instead:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
+python3.11 -m venv .venv           # Windows: py -3.11 -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install --upgrade pip
+pip install torch torchvision "ultralytics==8.4.128" "hdf5plugin==7.0.0" "kornia==0.8.3" \
+  h5py numba numpy opencv-python pillow pyyaml seaborn tqdm
 ```
 
-This will isolate the current terminal session and run a Python virtual environment.
+Keep the environment active for every step that follows.
 
 ### 3. Install the DSEC detection utilities
 
-The repo depends on the external `DSEC-det` package for dataset parsing and labelling support.
+The repo depends on the external `DSEC-det` package for dataset parsing and labelling support. Clone it **inside the project root**: `loaders/dataset_loader.py` reads the train/val/test split from `DSEC-det/config/train_val_test_split.yaml` relative to the project root, and stops with `FileNotFoundError` if the folder is anywhere else.
 
 ```bash
 git clone https://github.com/uzh-rpg/DSEC-det.git
 cd DSEC-det
 pip install -e .
+cd ..
 ```
 
-Make sure the environment remains active while running the training scripts.
+`DSEC-det/` is listed in `.gitignore`, so it never shows up in `git status`.
+
+### 4. Pretrained weights
+
+Training starts from Ultralytics' pretrained `yolo26n.pt`. It is not committed (`*.pt` is in `.gitignore`); Ultralytics downloads it into the project root on the first training run. On a machine without internet access, download `yolo26n.pt` from the [Ultralytics assets releases](https://github.com/ultralytics/assets/releases) and place it in the project root.
+
+### 5. Check the installation
+
+```bash
+python -c "import torch, ultralytics, cv2, h5py, hdf5plugin, kornia, dsec_det; print('torch', torch.__version__, '| ultralytics', ultralytics.__version__, '| CUDA', torch.cuda.is_available())"
+python -m unittest discover -s tests
+```
+
+The first command should print the versions without an `ImportError`. The test suite does not need the dataset. One test is skipped unless the `DSEC_ROOT` environment variable points to the dataset.
 
 ## Data layout
 
-This project expects the DSEC dataset to be available under a root folder such as `DSEC_ROOT`.
+The code uses the [DSEC-Detection](https://dsec.ifi.uzh.ch/dsec-detection/) dataset: the original DSEC sequences plus the DSEC-Detection extension (object labels and six extra sequences). The dataset is not in this repository and can live anywhere on disk; pass its root folder to every script with `--dataset-path`.
+
+### Downloading the dataset
+
+The `DSEC-det` clone from step 3 contains the official download scripts. Run all three from inside `DSEC-det/`, with an **absolute** path for `DSEC_ROOT`: the scripts `cd` into sub-folders, so a relative path puts files in the wrong place. On Windows, use WSL or another Bash-compatible environment to run these scripts.
+
+```bash
+cd DSEC-det
+DSEC_ROOT=/absolute/path/to/DSEC_ROOT
+bash scripts/download_dsec.sh "$DSEC_ROOT"             # original DSEC: events, images, calibration
+bash scripts/download_dsec_extra.sh "$DSEC_ROOT"       # DSEC-Detection: new sequences and object labels
+bash scripts/download_remapped_images.sh "$DSEC_ROOT"  # images remapped into the event camera view
+cd ..
+```
+
+`download_dsec.sh` also fetches disparity and optical flow, which this project does not use. The download is large: a 25-sequence partial copy takes 59 GB, so allow roughly 150 GB for all 60 sequences, plus temporary space for the zip files. See the [DSEC-det README](https://github.com/uzh-rpg/DSEC-det) for details.
+
+### Expected structure
 
 ```text
 DSEC_ROOT/
-└── train/
-    ├── sequence_01/
-    │   ├── calibration/
-    │   ├── events/
-    │   ├── images/
-    │   └── object_detections/
-    └── sequence_02/
-        ├── calibration/
-        ├── events/
-        ├── images/
-        └── object_detections/
-
+├── train/                          training AND validation sequences
+│   ├── thun_00_a/
+│   │   ├── calibration/
+│   │   ├── events/left/events.h5
+│   │   ├── images/timestamps.txt
+│   │   ├── images/left/distorted/*.png
+│   │   └── object_detections/left/tracks.npy
+│   ├── ...
+│   └── zurich_city_21_a/
+└── test/                           test sequences
+    ├── interlaken_00_a/
+    ├── ...
+    └── zurich_city_15_a/
 ```
 
-For the project to work correctly, each sequence should contain the usual DSEC structure, including:
+The split is set by `DSEC-det/config/train_val_test_split.yaml`:
 
-- `images/left/distorted/` for RGB frames
-- `events/` for event files
-- `object_detections/` with tracking label files
-- `timestamps.txt` and corresponding metadata for alignment
+| Split | Sequences | Read from |
+| --- | ---: | --- |
+| train | 41 | `DSEC_ROOT/train/` |
+| val | 6 (`zurich_city_16_a` to `zurich_city_21_a`) | `DSEC_ROOT/train/` |
+| test | 13 | `DSEC_ROOT/test/` |
 
-The dataset loader uses the DSEC split configuration in `DSEC-det/config/train_val_test_split.yaml` to determine which sequences belong to train, validation, and test subsets.
+Each sequence needs all four of: `images/timestamps.txt`, the distorted RGB frames in `images/left/distorted/`, the events in `events/left/events.h5` (read by the teacher and distillation runs), and the labels in `object_detections/left/tracks.npy`.
+
+### Incomplete dataset downloads
+
+**The code may not run correctly unless the dataset is downloaded in its entirety.** A partial or interrupted download does not always stop with a clear error. Depending on what is missing, you get one of the following:
+
+| What is missing | What happens |
+| --- | --- |
+| Some sequence folders | **No error.** `DSECDet` silently skips any sequence in the split file that is not on disk, so training runs on fewer sequences and the results will not match the report. Compare the `Training Sequences` and `Validation Sequences` lists in the run's `train.log` or `config.yaml` with the table above. |
+| Some of a sequence's distorted images | **Usually no error.** Frames are matched to labels by their position in the sorted image list, so every frame after a gap is paired with the wrong labels. If enough images are missing, the sequence's last frames raise `IndexError`. |
+| `DSEC_ROOT/test/` or all test sequences | Training runs, then stops at the final test step with `ValueError: The test split is empty; provide a labelled test dataset.` `evaluate.py` stops with the same error. |
+| All training sequences | Stops before the first epoch with `ValueError: num_samples should be a positive integer value, but got num_samples=0`. |
+| All validation sequences | Stops before the first epoch with `ValueError: Training and validation loaders must both be non-empty.` |
+| A sequence's `images/left/distorted/` folder | `IndexError: list index out of range` at the first batch that reaches that sequence. |
+| `timestamps.txt`, `tracks.npy` or `events.h5` | `FileNotFoundError` while the dataset loads or at the first affected batch. RGB-only runs never open `events.h5`, so a missing event file only breaks teacher and distillation runs. |
+| Part of a file, from an interrupted download or unzip | An `OSError` from h5py or NumPy when the file is opened or read, or an OpenCV error on an unreadable image. |
+| Any of the 41 training sequences, when re-measuring the event-density reference | `tools/measure_event_density.py` stops with `Complete training split required; missing sequences: ...`. Training is not blocked: it uses the committed `docs/event_density.json`. |
+
+If any of these appear, re-run the download scripts for the affected split and confirm each sequence folder has the four items listed above. To check the code on a smaller copy without a full download, use `--max-samples` (see [Smoke checks](#smoke-checks-and-diagnostics)); results from a partial dataset are not comparable with the report.
 
 ## Training pipeline
 
@@ -468,35 +540,46 @@ Run the unit and integration checks from the repository root:
 python -m unittest discover -s tests -v
 ```
 
-The test suite covers the project’s expected data-loading and training workflow behaviour.
+The test suite covers the project’s expected data-loading and training workflow behaviour. It uses synthetic data, so it runs without the dataset. `tests/test_overexposure_reference.py` also checks real DSEC reference frames when the `DSEC_ROOT` environment variable is set (`DSEC_ROOT=/path/to/DSEC_ROOT python -m unittest discover -s tests`); otherwise it is skipped.
 
 ## Smoke checks and diagnostics
 
-For a quick end-to-end check without a full run, limit every split to a few evenly spaced frames:
+The quickest end-to-end check is a one-epoch run on a few evenly spaced frames from each split. Execution time depends on the available hardware:
 
 ```bash
-python train_rgb_student.py --dataset-path dataset --epochs 1 --max-samples 16
+python train_rgb_student.py \
+  --dataset-path "/path/to/DSEC_ROOT" \
+  --epochs 1 \
+  --max-samples 8 \
+  --skip-test
 ```
+
+It should finish with `Test evaluation skipped (--skip-test).` and write `best_student_yolo.pt` to a new `runs/student/exp_NNN/`. Drop `--skip-test` to also exercise the test split. Swap in `train_teacher.py` to check the event files as well. `--max-samples` also works with a config, e.g. `--config configs/rgb_baseline.yaml --epochs 1 --max-samples 16`.
 
 ## Expected outputs
 
-Typical outputs include:
+Each training run creates a new numbered folder, `runs/<role>/exp_NNN/`, where `<role>` is `student`, `teacher` or `distill`. It contains:
 
-- training logs in `runs/`
-- best validation checkpoints such as `best_student_yolo.pt`
-- latest checkpoints for resume support
-- evaluation logs that report the loss values used for model selection
-- test results generated by the evaluation pipeline
+- `train.log`: the configuration, per-batch progress and per-epoch metrics
+- `config.yaml`, `run_args.yaml` and `run_command.txt`: the settings used, which `--resume` reads
+- `results.csv` and `results.png`: per-epoch metrics and training curves
+- `best_<role>_yolo.pt`: the checkpoint with the highest validation mAP50-95
+- `latest_<role>_yolo.pt`: the most recent checkpoint, for resuming
+- `quality_weights.csv`: each training image's `s_e`, `c_t` and `w` per epoch (`object-quality` runs only)
+- `test/`: confusion matrix, PR curves and example predictions from the final test step (absent with `--skip-test`)
 
 ## Troubleshooting
 
 If training or evaluation fails, check the following first:
 
-1. Ensure the dataset path points to the correct DSEC root.
-2. Confirm that `DSEC-det` is installed in the active environment.
-3. Confirm `train/val/test` directories are populated and labelled correctly.
-4. Ensure the checkpoint path and YAML config path are valid.
-5. Check that the environment matches the required Python and dependency versions.
+1. Ensure the dataset path points to the DSEC root, the folder that contains `train/` and `test/`.
+2. Confirm the dataset is complete (see [Incomplete dataset downloads](#incomplete-dataset-downloads)).
+3. `ModuleNotFoundError: No module named 'dsec_det'`: install `DSEC-det` in the active environment (`pip install -e DSEC-det`).
+4. `FileNotFoundError` for `DSEC-det/config/train_val_test_split.yaml`: `DSEC-det` must be cloned inside the project root.
+5. `mamba env create` fails with `pytorch-cuda =12.1 * does not exist`: you are on macOS; use the venv route in step 2.
+6. Run every script from the project root, so `yolo26n.pt`, `docs/` and `runs/` are found.
+7. Ensure the checkpoint path passed to `--weights` or `--teacher-checkpoint` exists. The distillation configs expect the trained teacher at `checkpoints/teacher.pt`.
+8. Check that the environment matches the required Python and dependency versions.
 
 This project is meant to serve as a full training and evaluation workflow for DSEC-based RGB and RGB + event detection experiments. It is especially useful for experimenting with student–teacher knowledge transfer and multi-modal perception pipelines in a structured and reproducible setup.
 
