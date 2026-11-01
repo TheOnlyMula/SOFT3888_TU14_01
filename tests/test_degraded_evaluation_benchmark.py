@@ -5,10 +5,11 @@ from unittest.mock import MagicMock, patch
 import random
 import numpy as np
 import torch
-from evaluate import evaluate_degraded_benchmark, format_benchmark_table
+from evaluation.metrics import evaluate_degraded_benchmark, format_benchmark_table
 from torch.utils.data import DataLoader, TensorDataset
 
-from dataset_loader import DSECFusionDataset, degradation_seed, rgb_loader_fingerprint
+from loaders.dataset_loader import DSECFusionDataset, rgb_loader_fingerprint
+from degradation.conditions import degradation_seed
 
 
 class _PicklableDSECDet:
@@ -139,8 +140,8 @@ class DegradedEvaluationBenchmarkTests(unittest.TestCase):
         self.assertNotEqual(first, different_type)
         self.assertNotEqual(first, different_strength)
 
-    @patch("dataset_loader.DSECDet")
-    @patch("dataset_loader.yaml_file_to_dict")
+    @patch("loaders.dataset_loader.DSECDet")
+    @patch("loaders.dataset_loader.yaml_file_to_dict")
     def test_invalid_degradation_is_rejected(self, _, __):
         with self.assertRaises(ValueError):
             DSECFusionDataset(
@@ -148,8 +149,8 @@ class DegradedEvaluationBenchmarkTests(unittest.TestCase):
                 degradation="rain",
             )
 
-    @patch("dataset_loader.DSECDet")
-    @patch("dataset_loader.yaml_file_to_dict")
+    @patch("loaders.dataset_loader.DSECDet")
+    @patch("loaders.dataset_loader.yaml_file_to_dict")
     def test_negative_degradation_strength_is_rejected(self, _, __):
         with self.assertRaises(ValueError):
             DSECFusionDataset(
@@ -158,7 +159,7 @@ class DegradedEvaluationBenchmarkTests(unittest.TestCase):
                 degradation_strength=-0.1,
             )
 
-    @patch("dataset_loader.DSECDet")
+    @patch("loaders.dataset_loader.DSECDet")
     def test_degraded_fingerprint_is_independent_of_batch_size(self, dataset_class):
         base = dataset_class.return_value
         base.__len__.return_value = 8
@@ -250,13 +251,11 @@ class DegradedEvaluationBenchmarkTests(unittest.TestCase):
 
         self.assertEqual(first, second)
 
-    @patch("evaluate.evaluate_test_model")
-    @patch("evaluate.rgb_loader_fingerprint")
-    @patch("evaluate.create_test_loader")
+    @patch("evaluation.metrics.evaluate_test_model")
+    @patch("evaluation.metrics.create_test_loader")
     def test_benchmark_runs_all_three_conditions(
         self,
         create_loader,
-        fingerprint,
         evaluate_model,
     ):
         clean_loader = object()
@@ -269,28 +268,10 @@ class DegradedEvaluationBenchmarkTests(unittest.TestCase):
             over_loader,
         ]
 
-        fingerprint.side_effect = [
-            "clean-fingerprint",
-            "dark-fingerprint",
-            "over-fingerprint",
-        ]
-
         evaluate_model.side_effect = [
-            {
-                "map50": 0.60,
-                "map50_95": 0.40,
-                "recall": 0.70,
-            },
-            {
-                "map50": 0.50,
-                "map50_95": 0.30,
-                "recall": 0.60,
-            },
-            {
-                "map50": 0.45,
-                "map50_95": 0.25,
-                "recall": 0.55,
-            },
+            {"map50": 0.60, "map50_95": 0.40, "recall": 0.70, "fingerprint": "clean-fingerprint"},
+            {"map50": 0.50, "map50_95": 0.30, "recall": 0.60, "fingerprint": "dark-fingerprint"},
+            {"map50": 0.45, "map50_95": 0.25, "recall": 0.55, "fingerprint": "over-fingerprint"},
         ]
 
         logger = MagicMock()
@@ -331,23 +312,27 @@ class DegradedEvaluationBenchmarkTests(unittest.TestCase):
         self.assertAlmostEqual(results["dark"]["recall_drop"], 0.10)
         self.assertAlmostEqual(results["overexposed"]["recall_drop"], 0.15)
         self.assertEqual(results["clean"]["recall_drop"], 0.0)
+        self.assertEqual(
+            [results[c]["fingerprint"] for c in ("clean", "dark", "overexposed")],
+            ["clean-fingerprint", "dark-fingerprint", "over-fingerprint"],
+        )
+        # The fingerprint comes from the evaluation pass itself, not a second pass over the data
+        self.assertTrue(all(call.kwargs["fingerprint"] for call in evaluate_model.call_args_list))
 
-    @patch("evaluate.evaluate_test_model")
-    @patch("evaluate.rgb_loader_fingerprint")
-    @patch("evaluate.create_test_loader")
+    @patch("evaluation.metrics.evaluate_test_model")
+    @patch("evaluation.metrics.create_test_loader")
     def test_benchmark_uses_same_checkpoint_for_every_condition(
         self,
         create_loader,
-        fingerprint,
         evaluate_model,
     ):
         create_loader.side_effect = [object(), object(), object()]
-        fingerprint.side_effect = ["clean", "dark", "overexposed"]
 
         evaluate_model.return_value = {
             "map50": 0.5,
             "map50_95": 0.3,
             "recall": 0.6,
+            "fingerprint": "inputs",
         }
 
         checkpoint = Path("best_student.pt")
@@ -409,7 +394,7 @@ class DegradedEvaluationBenchmarkTests(unittest.TestCase):
         self.assertIn("overexposed", output)
         self.assertIn("Recall Drop", output)
 
-    @patch("dataset_loader.DSECDet")
+    @patch("loaders.dataset_loader.DSECDet")
     def test_rgb_benchmark_does_not_open_event_files(self, dataset_class):
         base = dataset_class.return_value
 
@@ -443,8 +428,8 @@ class DegradedEvaluationBenchmarkTests(unittest.TestCase):
         base.get_events.assert_not_called()
         base.__getitem__.assert_not_called()
 
-    @patch("dataset_loader.load_causal_events")
-    @patch("dataset_loader.DSECDet")
+    @patch("loaders.dataset_loader.load_causal_events")
+    @patch("loaders.dataset_loader.DSECDet")
     def test_teacher_event_channels_and_labels_are_unchanged(
         self,
         dataset_class,
@@ -536,8 +521,8 @@ class DegradedEvaluationBenchmarkTests(unittest.TestCase):
             rgb_loader_fingerprint(loader_four_workers),
         )
 
-    @patch("dataset_loader.load_causal_events")
-    @patch("dataset_loader.DSECDet")
+    @patch("loaders.dataset_loader.load_causal_events")
+    @patch("loaders.dataset_loader.DSECDet")
     def test_dark_degradation_changes_only_rgb_channels(
         self,
         dataset_class,
@@ -594,7 +579,7 @@ class DegradedEvaluationBenchmarkTests(unittest.TestCase):
         torch.testing.assert_close(clean_image[3:], dark_image[3:])
         torch.testing.assert_close(clean_targets, dark_targets)
 
-    @patch("dataset_loader.DSECDet")
+    @patch("loaders.dataset_loader.DSECDet")
     def test_overexposed_degradation_changes_rgb(self, dataset_class):
         base = dataset_class.return_value
 
@@ -630,7 +615,7 @@ class DegradedEvaluationBenchmarkTests(unittest.TestCase):
 
         self.assertFalse(torch.equal(clean_image, over_image))
 
-    @patch("dataset_loader.DSECDet")
+    @patch("loaders.dataset_loader.DSECDet")
     def test_dark_degradation_is_deterministic_for_same_seed(self, dataset_class):
         base = dataset_class.return_value
 
@@ -668,7 +653,7 @@ class DegradedEvaluationBenchmarkTests(unittest.TestCase):
 
         torch.testing.assert_close(first_image, second_image)
 
-    @patch("dataset_loader.DSECDet")
+    @patch("loaders.dataset_loader.DSECDet")
     def test_dark_degradation_changes_with_evaluation_seed(self, dataset_class):
         base = dataset_class.return_value
 
@@ -706,7 +691,7 @@ class DegradedEvaluationBenchmarkTests(unittest.TestCase):
 
         self.assertFalse(torch.equal(first_image, second_image))
 
-    @patch("dataset_loader.DSECDet")
+    @patch("loaders.dataset_loader.DSECDet")
     def test_degraded_fingerprint_is_independent_of_worker_count(self, dataset_class):
         dataset_class.return_value = _PicklableDSECDet()
 
@@ -748,7 +733,7 @@ class DegradedEvaluationBenchmarkTests(unittest.TestCase):
         )
         self.assertEqual(dataset_class.call_count, 2)
 
-    @patch("dataset_loader.DSECDet")
+    @patch("loaders.dataset_loader.DSECDet")
     def test_degraded_fingerprint_is_independent_of_prior_random_use(self, dataset_class):
         base = dataset_class.return_value
         base.__len__.return_value = 8
@@ -813,7 +798,7 @@ class DegradedEvaluationBenchmarkTests(unittest.TestCase):
 
         self.assertEqual(first, second)
 
-    @patch("dataset_loader.DSECDet")
+    @patch("loaders.dataset_loader.DSECDet")
     def test_degraded_fingerprint_changes_with_evaluation_seed(self, dataset_class):
         base = dataset_class.return_value
         base.__len__.return_value = 8

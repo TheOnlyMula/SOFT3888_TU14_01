@@ -1,7 +1,5 @@
-import argparse
 import math
 import os
-from numbers import Integral
 from functools import lru_cache
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,19 +9,23 @@ import h5py
 import hdf5plugin  # Required to prevent Blosc decompression error
 import numpy as np
 import torch
-from torch.utils.data import Dataset, DataLoader, Subset, get_worker_info
+from torch.utils.data import Dataset, DataLoader, Subset, default_collate, get_worker_info
 from dsec_det.dataset import DSECDet
-from dsec_det.label import CLASSES, COLORS
 from dsec_det.io import yaml_file_to_dict
-from overexposure import STRENGTH_LEVELS, overexpose, resolve_strength
-from darkening import STRENGTH_RANGES as DARKENING_LEVELS, darken
-from augment import augment_sample
+from degradation.darkening import darken
+from degradation.overexposure import overexpose
+from degradation.strength import resolve_strength
+from degradation.conditions import (
+    DEFAULT_AUGMENTATION_SEED, DEFAULT_STRENGTH_RANGE,
+    augment_rgb_degradation, degradation_seed,
+    validate_augmentation_seed, validate_degradation_shares, validate_strength_range,
+)
+from .augment import augment_sample
 import logging
-from ultralytics import YOLO
 
 
 SPLIT_CONFIG_PATH = (
-    Path(__file__).resolve().parent
+    Path(__file__).resolve().parents[1]
     / "DSEC-det"
     / "config"
     / "train_val_test_split.yaml"
@@ -32,82 +34,6 @@ SPLIT_CONFIG_PATH = (
 EVENT_WINDOW_US = 50_000
 
 EVENT_SCALE_K = 44.0
-
-DEFAULT_DEGRADATION_SHARES = (0.5, 0.25, 0.25)
-DEFAULT_STRENGTH_RANGE = (STRENGTH_LEVELS["mild"], STRENGTH_LEVELS["strong"])
-DEFAULT_AUGMENTATION_SEED = 0
-
-# Illumination factor that benchmark strength 1 ("strong") darkens to: darkening's "strong" level
-DARKEST_ILLUMINATION = DARKENING_LEVELS["strong"]
-
-
-def validate_augmentation_seed(seed):
-    if isinstance(seed, bool) or not isinstance(seed, Integral) or seed < 0:
-        raise ValueError("augmentation seed must be a non-negative integer")
-    return int(seed)
-
-
-def validate_degradation_shares(shares):
-    """Validate probabilities ordered as clean, dark, overexposed."""
-    shares = tuple(float(value) for value in shares)
-    if (len(shares) != 3 or any(not math.isfinite(p) or p < 0 for p in shares)
-            or not math.isclose(sum(shares), 1.0, rel_tol=0, abs_tol=1e-8)):
-        raise ValueError("degradation shares must be three finite non-negative values summing to 1")
-    return shares
-
-
-def validate_strength_range(strength_range):
-    """Validate an inclusive minimum/maximum on the benchmark's [0, 1] scale."""
-    values = tuple(float(value) for value in strength_range)
-    if (len(values) != 2 or any(not math.isfinite(value) for value in values)
-            or not 0 <= values[0] <= values[1] <= 1):
-        raise ValueError("strength range must be two finite values with 0 <= min <= max <= 1")
-    return values
-
-
-def augment_rgb_degradation(
-    image, shares,
-    dark_strength_range=DEFAULT_STRENGTH_RANGE,
-    overexposed_strength_range=DEFAULT_STRENGTH_RANGE,
-    *, rng: np.random.Generator,
-):
-    """Sample a fresh condition and uniform degradation strength on each access."""
-    condition = rng.choice(("clean", "dark", "overexposed"), p=shares)
-    if condition == "dark":
-        strength = rng.uniform(*dark_strength_range)
-        return apply_dark_degradation(image, strength=strength, seed=int(rng.integers(2**63)))
-    if condition == "overexposed":
-        strength = rng.uniform(*overexposed_strength_range)
-        return overexpose(image, strength)
-    return image
-
-
-def degradation_seed(
-    evaluation_seed: int,
-    sequence_name: str,
-    frame_index: int,
-    degradation: str,
-    strength: float,
-) -> int:
-    seed_input = (
-        f"{evaluation_seed}|{sequence_name}|{frame_index}|{degradation}|{strength}"
-    ).encode("utf-8")
-
-    digest = hashlib.sha256(seed_input).digest()
-    return int.from_bytes(digest[:8], byteorder="little", signed=False)
-
-
-def apply_dark_degradation(image: np.ndarray, strength: float, seed: int) -> np.ndarray:
-    """Darken an RGB uint8 image with `darkening.darken` on the shared benchmark strength scale.
-
-    Strength 0 leaves the image unchanged, strength 1 ("strong") is darkening's own "strong" level, and the illumination falls
-    linearly in between, so "mild" (0.35) dims to 72% illumination. `seed` fixes the
-    illumination field and sensor noise.
-    """
-    if strength == 0:
-        return image.copy()
-    illumination = 1.0 - (1.0 - DARKEST_ILLUMINATION) * strength
-    return darken(image, illumination, seed=seed)["image"]
 
 
 def update_rgb_fingerprint(hasher, images: torch.Tensor) -> None:
@@ -161,6 +87,10 @@ def snapshot_directory_caches(base_dataset: DSECDet) -> None:
         directory.events = SimpleNamespace(root=events.root, event_file=events.event_file)
 
 
+def event_coverage(histogram: torch.Tensor) -> torch.Tensor:
+    return (histogram > 0).any(dim=0).float().mean()
+
+
 def load_causal_events(
     base_dataset: DSECDet, idx: int, window_us: int = EVENT_WINDOW_US
 ) -> dict:
@@ -194,7 +124,19 @@ class DSECFusionDataset(Dataset):
         overexposed_strength_range=DEFAULT_STRENGTH_RANGE,
         augmentation_seed=DEFAULT_AUGMENTATION_SEED,
         augment=False,
+        with_event_window=False,
+        rgb_dropout=0.0,
     ):
+        if with_event_window and rgb_only:
+            raise ValueError("with_event_window needs the event channels")
+        if not 0 <= rgb_dropout < 1:
+            raise ValueError("rgb_dropout must be a probability in [0, 1)")
+        if rgb_dropout and (rgb_only or split != "train"):
+            raise ValueError("rgb_dropout applies to training samples with events only")
+        # Modality dropout
+        self.rgb_dropout = rgb_dropout
+        # Also return each sample's event window: its sequence, frame and event_coverage
+        self.with_event_window = with_event_window
         self.augmentation_seed = validate_augmentation_seed(augmentation_seed)
         self._augmentation_rng = None
         self._augmentation_worker_id = None
@@ -202,8 +144,10 @@ class DSECFusionDataset(Dataset):
         self.overexposed_strength_range = validate_strength_range(overexposed_strength_range)
         self.augmentation_shares = None
         if augmentation_shares is not None:
-            if split != "train" or not rgb_only or degradation != "clean":
-                raise ValueError("degradation augmentation requires clean RGB-only training data")
+            # With events, only the RGB is degraded (before the events are attached), so the
+            # teacher learns to lean on its events when the RGB is poor
+            if split != "train" or degradation != "clean":
+                raise ValueError("degradation augmentation applies to clean training data only")
             self.augmentation_shares = validate_degradation_shares(augmentation_shares)
         split_config = yaml_file_to_dict(SPLIT_CONFIG_PATH)
 
@@ -241,7 +185,8 @@ class DSECFusionDataset(Dataset):
             self._augmentation_worker_id = worker_id
         return self._augmentation_rng
 
-    def generate_event_histogram(self, events, height=480, width=640):
+    @staticmethod
+    def generate_event_histogram(events, height=480, width=640):
         hist = np.zeros((2, height, width), dtype=np.float32)
 
         if events is not None and len(events.get("x", [])) > 0:
@@ -286,9 +231,7 @@ class DSECFusionDataset(Dataset):
                 degradation=self.degradation,
                 strength=self.degradation_strength,
             )
-            image = apply_dark_degradation(
-                image, strength=self.degradation_strength, seed=frame_seed
-            )
+            image = darken(image, strength=self.degradation_strength, seed=frame_seed)["image"]
         elif self.degradation == "overexposed":
             image = overexpose(image, self.degradation_strength)
 
@@ -307,6 +250,15 @@ class DSECFusionDataset(Dataset):
                 sample.get("events"), height=h, width=w
             )
 
+        if self.with_event_window:
+            # Measured before augmentation, whose zoom and interpolation would change the coverage
+            frame_index, _, directory = self.base_dataset.rel_index(idx)
+            event_window = {
+                "sequence": directory.root.name,
+                "frame": frame_index,
+                "coverage": event_coverage(event_tensor),
+            }
+
         if self.augment:
             # One random draw moves RGB, events and boxes together
             events = None if event_tensor is None else event_tensor.permute(1, 2, 0).numpy()
@@ -315,6 +267,9 @@ class DSECFusionDataset(Dataset):
                 event_tensor = torch.from_numpy(events).permute(2, 0, 1)
 
         img_tensor = torch.from_numpy(image).permute(2, 0, 1).float() / 255.0
+        if self.rgb_dropout and self.augmentation_rng().random() < self.rgb_dropout:
+            # Without RGB, only the events can show where the labelled objects are
+            img_tensor = torch.zeros_like(img_tensor)
 
         yolo_targets = [
             [
@@ -331,14 +286,18 @@ class DSECFusionDataset(Dataset):
 
         if self.rgb_only:
             return img_tensor, target_tensor
-        else:
-            fused_tensor = torch.cat((img_tensor, event_tensor), dim=0)
-            return fused_tensor, target_tensor
+        fused_tensor = torch.cat((img_tensor, event_tensor), dim=0)
+        if self.with_event_window:
+            return fused_tensor, target_tensor, event_window
+        return fused_tensor, target_tensor
 
 
 def yolo_collate_fn(batch):
-    """Collate function for RGB-only YOLO training."""
-    imgs, targets = zip(*batch)
+    """Collate YOLO samples into (images, targets), plus the event windows when samples carry them.
+
+    The event windows collate to {"sequence": list, "frame": tensor, "coverage": tensor}.
+    """
+    imgs, targets, *event_windows = zip(*batch)
 
     # Stack images into a standard batch tensor
     imgs = torch.stack(imgs, 0)
@@ -355,6 +314,8 @@ def yolo_collate_fn(batch):
     else:
         targets = torch.empty((0, 6))
 
+    if event_windows:
+        return imgs, targets, default_collate(event_windows[0])
     return imgs, targets
 
 
@@ -409,6 +370,8 @@ def create_dataloaders(
     augmentation_seed: int = DEFAULT_AUGMENTATION_SEED,
     augment: bool = False,
     seed: int | None = None,
+    with_event_window: bool = False,
+    rgb_dropout: float = 0.0,
 ) -> tuple[DataLoader, DataLoader]:
     """Create reproducible training and validation Dataloaders using explicit sequence splits.
 
@@ -418,19 +381,21 @@ def create_dataloaders(
     clean unless `degradation` explicitly requests an evaluation condition; its
     strength and seed are independent of the training augmentation settings.
     `augment` applies geometric and colour augmentation to the train split only. `seed`
-    fixes the shuffle order and the per-worker augmentation draws.
+    fixes the shuffle order and the per-worker augmentation draws. `with_event_window` adds each
+    training sample's event window (see DSECFusionDataset) to the training batches, and
+    `rgb_dropout` blanks the RGB of that share of training samples (teacher modality dropout).
     """
     _check_loader_settings(logger, batch_size, num_workers)
 
     train_dataset = limit_dataset(
         DSECFusionDataset(
             dataset_path=dataset_path, split="train", rgb_only=rgb_only, augment=augment,
-            **({
-                "augmentation_shares": augmentation_shares,
-                "dark_strength_range": dark_strength_range,
-                "overexposed_strength_range": overexposed_strength_range,
-                "augmentation_seed": augmentation_seed,
-            } if augmentation_shares is not None else {}),
+            with_event_window=with_event_window,
+            rgb_dropout=rgb_dropout,
+            augmentation_shares=augmentation_shares,
+            dark_strength_range=dark_strength_range,
+            overexposed_strength_range=overexposed_strength_range,
+            augmentation_seed=augmentation_seed,
         ),
         max_samples,
     )

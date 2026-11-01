@@ -3,7 +3,8 @@ import unittest
 
 import numpy as np
 
-from darkening import STRENGTH_RANGES, darken
+from degradation.darkening import STRONG_ILLUMINATION, VARIATION, darken
+from degradation.strength import STRENGTH_LEVELS
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -25,18 +26,21 @@ class DarkeningTests(unittest.TestCase):
     def setUp(self):
         self.image = sample_rgb_image()
 
-    def test_named_strength_levels_are_defined(self):
-        self.assertIn("mild", STRENGTH_RANGES)
-        self.assertIn("strong", STRENGTH_RANGES)
-
-        for level in ("minimal", "mild", "medium", "strong"):
+    def test_benchmark_levels_are_accepted(self):
+        for level in STRENGTH_LEVELS:
             with self.subTest(level=level):
                 result = darken(self.image, level, seed=17)
                 self.assertEqual(result["image"].shape, self.image.shape)
 
+    def test_strong_draws_its_illumination_around_the_strong_level(self):
+        for seed in range(20):
+            factor = darken(self.image, "strong", seed=seed)["global_illum_factor"]
+            self.assertGreaterEqual(factor, STRONG_ILLUMINATION - VARIATION)
+            self.assertLess(factor, STRONG_ILLUMINATION + VARIATION)
+
     def test_invalid_strength_raises_value_error(self):
         with self.assertRaises(ValueError):
-            darken(self.image, "invalid_strength", seed=17)\
+            darken(self.image, "invalid_strength", seed=17)
 
     def test_negative_strength_raises_value_error(self):
         with self.assertRaises(ValueError):
@@ -55,12 +59,12 @@ class DarkeningTests(unittest.TestCase):
         self.assertGreaterEqual(int(darkened.min()), 0)
         self.assertLessEqual(int(darkened.max()), 255)
 
-    def test_zero_strength_returns_black_image_with_input_shape(self):
+    def test_zero_strength_returns_an_unchanged_copy(self):
         result = darken(self.image, 0, seed=17)
 
-        np.testing.assert_array_equal(result["image"], np.zeros_like(self.image))
-        self.assertEqual(result["image"].shape, self.image.shape)
-        self.assertEqual(result["image"].dtype, np.uint8)
+        np.testing.assert_array_equal(result["image"], self.image)
+        self.assertIsNot(result["image"], self.image)
+        self.assertEqual(result["global_illum_factor"], 1.0)
 
     def test_same_image_strength_and_seed_are_reproducible(self):
         first = darken(self.image, "mild", seed=1234)

@@ -1,17 +1,17 @@
 """One training run: from command-line arguments to a validated, tested best checkpoint."""
 import sys
 
-import log
-from dataset_loader import create_dataloaders, create_test_loader, sequence_names
-from distillation import (
+from utils import log
+from loaders.dataset_loader import create_dataloaders, create_test_loader, sequence_names
+from .distillation import (
+    EVENT_DENSITY_REFERENCE,
     MASK_ENLARGEMENT,
     TEACHER_CONFIDENCE_THRESHOLD,
-    load_event_density_reference,
     load_teacher,
 )
-from evaluate import evaluate_test_model
+from evaluation.metrics import evaluate_test_model
 from ultralytics.utils.torch_utils import init_seeds
-from utils import (
+from utils.model import (
     NOMINAL_BATCH_SIZE,
     OPTIMISER_LR,
     select_device,
@@ -32,8 +32,6 @@ def main(role: str, rgb_only: bool) -> None:
         else "Train and validate the RGB + event teacher model."
     )
     args = parse_args(description)
-    if args.degradation_augmentation and (not rgb_only or args.teacher_checkpoint is not None):
-        raise ValueError("--degradation-augmentation only applies to RGB-only training without a teacher")
     resuming = args.resume is not None
 
     log_directory = args.resume if resuming else log.create_log_directory(role)
@@ -44,14 +42,18 @@ def main(role: str, rgb_only: bool) -> None:
         log_directory,
         console_level=args.console_level,
     )
+    config_file = str(args.config) if args.config else None
     if resuming:
         if not latest_path.is_file():
             message = f"Cannot resume: no latest checkpoint at {latest_path}. Start a new run instead."
             logger.error(message)
             raise FileNotFoundError(message)
         logger.info("Resuming %s with: %s", log_directory, " ".join(sys.argv))
+        config_file = log.load_model_config(log_directory).get("Config File")
     else:
-        log.log_command(sys.argv, log_directory)
+        # With --config, this is the command with the file's settings spelled out, so a resume
+        # repeats exactly this run even if the file changes later
+        log.log_command(args.command, log_directory)
 
     device = select_device()
     # Seed before anything random is built: the student's fresh head, the shuffle, augmentation
@@ -62,19 +64,12 @@ def main(role: str, rgb_only: bool) -> None:
         message = "--teacher-checkpoint only applies to the RGB student."
         logger.error(message)
         raise ValueError(message)
+    if args.rgb_dropout and rgb_only:
+        # A student must always see its RGB, including in distillation's event-carrying loader
+        message = "--rgb-dropout only applies to the teacher, whose input includes events."
+        logger.error(message)
+        raise ValueError(message)
     quality_weighted = distilling and args.distill_mode == "object-quality"
-    event_density_reference = None
-    if quality_weighted:
-        # Read the frozen s_e reference now, so a missing file stops the run before training
-        try:
-            event_density_reference = load_event_density_reference()
-        except FileNotFoundError as error:
-            message = (
-                "--distill-mode object-quality needs docs/event_density_reference.json; "
-                "create it once with tools/measure_event_density.py."
-            )
-            logger.error(message)
-            raise FileNotFoundError(message) from error
 
     model = extract_trainable_model(
         ch=input_channels,
@@ -93,28 +88,27 @@ def main(role: str, rgb_only: bool) -> None:
         num_workers = args.num_workers,
         max_samples = args.max_samples,
     )
-    augmentation_settings = (
-        {
-            "augmentation_shares": args.degradation_shares,
-            "dark_strength_range": args.dark_strength_range,
-            "overexposed_strength_range": args.overexposed_strength_range,
-            "augmentation_seed": args.augmentation_seed,
-        } if args.degradation_augmentation else {}
+    train_settings = dict(
+        augment=not args.no_augment,
+        seed=args.seed,
+        augmentation_shares=args.degradation_shares if args.degradation_augmentation else None,
+        dark_strength_range=args.dark_strength_range,
+        overexposed_strength_range=args.overexposed_strength_range,
+        augmentation_seed=args.augmentation_seed,
     )
-    train_settings = dict(augment=not args.no_augment, seed=args.seed)
     train_loader, val_loader = create_dataloaders(
-        rgb_only=rgb_only, **loader_settings, **train_settings, **augmentation_settings,
+        rgb_only=rgb_only, rgb_dropout=args.rgb_dropout, **loader_settings, **train_settings,
     )
     if distilling:
-        # The teacher needs the paired event channels, so training re-reads with events while
-        # validation keeps the RGB-only loader built above. Augmentation makes the same random
-        # draws either way, so the student sees the same RGB views as the RGB-only baseline.
-        train_loader, _ = create_dataloaders(rgb_only=False, **loader_settings, **train_settings)
+        train_loader, _ = create_dataloaders(
+            rgb_only=False, with_event_window=quality_weighted, **loader_settings, **train_settings,
+        )
 
     optimiser = create_optimiser(model, batch_size=args.batch_size)
 
     config = {
         'Model': role,
+        'Config File': config_file,
         'Input Channels': input_channels,
         'Selected Device': str(device),
         'Epochs': args.epochs,
@@ -135,12 +129,13 @@ def main(role: str, rgb_only: bool) -> None:
         'Optimiser': type(optimiser).__name__,
         'Learning Rate': OPTIMISER_LR,
         'Deterministic': True,
+        'RGB Dropout': args.rgb_dropout,
         'Teacher Checkpoint': str(args.teacher_checkpoint) if distilling else None,
         'Lambda Distill': args.lambda_distill if distilling else None,
         'Distill Mode': args.distill_mode if distilling else None,
         'Object Mask Enlargement': MASK_ENLARGEMENT if distilling and args.distill_mode != "unweighted" else None,
         'Teacher Confidence Threshold': TEACHER_CONFIDENCE_THRESHOLD if distilling else None,
-        'Event Density Reference': event_density_reference,
+        'Event Density Reference': EVENT_DENSITY_REFERENCE if quality_weighted else None,
         'Training Augmentation': {
             'enabled': args.degradation_augmentation,
             'shares': dict(zip(('clean', 'dark', 'overexposed'), args.degradation_shares)),

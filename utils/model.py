@@ -1,6 +1,6 @@
 from pathlib import Path
-from types import SimpleNamespace
 import torch
+from ultralytics.cfg import get_cfg
 from ultralytics.engine.trainer import BaseTrainer
 from ultralytics.nn.tasks import DetectionModel, load_checkpoint as load_checkpoint_weights
 
@@ -17,49 +17,38 @@ def build_model(ch: int = 3, weights_path: str | Path | None = None) -> Detectio
     """
     Build the stock YOLO26n architecture with a DSEC class head and `ch` input channels.
     Pretrained weights are transferred wherever layer names and shapes match.
+
+    The teacher's first layer (RGB + 2 event channels) does not match the pretrained RGB one, so
+    its RGB filters are copied from it and its event filters start at zero: the teacher starts as
+    the pretrained RGB detector and learns from there how much to use the events.
     """
     model = DetectionModel("yolo26n.yaml", ch=ch, nc=len(DSEC_NAMES), verbose=False)
     if weights_path:
-        model.load(load_checkpoint_weights(str(weights_path))[0])
+        pretrained = load_checkpoint_weights(str(weights_path))[0]
+        model.load(pretrained)
+        if ch > 3:
+            with torch.no_grad():
+                first_layer = model.model[0].conv.weight
+                first_layer[:, :3] = pretrained.model[0].conv.weight
+                first_layer[:, 3:] = 0
     model.names = DSEC_NAMES
     return model
 
 def extract_trainable_model(
     ch: int = 3,
-    weights_path: str | Path = "yolo26n.pt", 
+    weights_path: str | Path = "yolo26n.pt",
     device: str | torch.device | None = None,
     epochs: int = 1,
 ) -> torch.nn.Module:
+    """Build a DSEC YOLO26n model with pretrained weights, ready for the custom training loop.
+
+    The loss reads its gains (box, cls, dfl) from `model.args`, which gets Ultralytics' default
+    training config just as its own trainer sets it; `epochs` drives the end-to-end loss schedule.
     """
-    Build a DSEC YOLO26n model, load pretrained weights,
-    and prep the raw PyTorch nn.Module for custom training.
-    """
-    model = build_model(ch, weights_path)
-    model.train()
-    
+    model = build_model(ch, weights_path).train()
     if device:
         model = model.to(device)
-        
-    for param in model.parameters():
-        param.requires_grad = True
-
-    training_hyps = {
-        'box': 7.5,
-        'cls': 0.5,
-        'dfl': 1.5,
-        'label_smoothing': 0.0,
-        'fl_gamma': 2.0,
-        'device': str(device) if device else None,
-        'epochs': epochs,
-    }
-
-    hyp_namespace = SimpleNamespace(**training_hyps)
-    
-    model.args = hyp_namespace
-    for m in model.modules():
-        if hasattr(m, 'args'):
-            m.args = hyp_namespace
-
+    model.args = get_cfg(overrides={"epochs": epochs})
     return model
 
 def set_loss_schedule(model: torch.nn.Module, completed_epochs: int) -> None:
@@ -110,47 +99,27 @@ def load_checkpoint(
     device: torch.device, 
     model: torch.nn.Module, 
     optimiser: torch.optim.Optimizer,
-    ema=None,
-    scheduler=None
-) -> dict:
-    """ Load the checkpoint if it exists, otherwise return default values. """
+    ema,
+    scheduler,
+) -> int:
+    """Restore the latest checkpoint if there is one, and return how many epochs it completed.
+
+    The checkpoint holds the raw model, the optimiser, the EMA model and its update count, and the
+    learning-rate schedule, so training continues exactly where it stopped.
+    """
     if not Path(checkpoint_path).is_file():
-        return {'past_epochs': 0, 'latest_val_loss': float('inf')}
+        return 0
 
     checkpoint = torch.load(checkpoint_path, map_location=device)
-
-    if "raw_model_state_dict" in checkpoint:
-        model.load_state_dict(checkpoint["raw_model_state_dict"])
-    else:
-        model.load_state_dict(checkpoint["model_state_dict"])
-        
+    model.load_state_dict(checkpoint["raw_model_state_dict"])
     optimiser.load_state_dict(checkpoint["optimiser_state_dict"])
-    
-    if ema is not None and "ema_updates" in checkpoint:
-        ema.ema.load_state_dict(checkpoint["model_state_dict"])
-        ema.updates = checkpoint["ema_updates"]
-        
-    if scheduler is not None and "scheduler_state_dict" in checkpoint:
-        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+    ema.ema.load_state_dict(checkpoint["model_state_dict"])
+    ema.updates = checkpoint["ema_updates"]
+    scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+    return checkpoint["epoch"]
 
-    return {'past_epochs': checkpoint["epoch"], 'latest_val_loss': checkpoint["val_loss"]}
-
-def fetch_best_dict(
-    best_path: str | Path, 
-    device: torch.device, 
-    model: torch.nn.Module, 
-    optimiser: torch.optim.Optimizer, 
-    mode: int = 0
-) -> dict:
-    """ Load the best checkpoint if it exists, otherwise return default values."""
+def best_checkpoint_map50_95(best_path: str | Path, device: torch.device) -> float:
+    """Validation mAP50-95 of the best checkpoint so far, or -inf before there is one."""
     if not Path(best_path).is_file():
-        return {'best_epoch': 0, 'best_map50_95': float('-inf')}
-
-    best_state = torch.load(best_path, map_location=device)
-
-    if mode == 1:
-        model.load_state_dict(best_state["model_state_dict"])
-        optimiser.load_state_dict(best_state["optimiser_state_dict"])
-
-    best_map50_95 = best_state.get("val_metrics", {}).get("map50_95", float('-inf'))
-    return {'best_epoch': best_state["epoch"], 'best_map50_95': best_map50_95}
+        return float('-inf')
+    return torch.load(best_path, map_location=device)["val_metrics"]["map50_95"]

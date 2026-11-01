@@ -1,0 +1,9 @@
+# The proposed method: quality-weighted object-aware distillation
+#   python train_distilled_student.py --config configs/proposed_event.yaml --dataset-path DATASET --num-workers N
+# Benchmark report name: proposed_event
+epochs: 25
+batch_size: 6
+seed: 0
+teacher_checkpoint: checkpoints/teacher.pt  # the frozen teacher (see teacher.yaml)
+lambda_distill: 10.0
+distill_mode: object-quality

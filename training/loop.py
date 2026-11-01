@@ -9,18 +9,18 @@ from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 from ultralytics.utils.torch_utils import ModelEMA
 
-import log
-from evaluate import validate_model, _prepare_yolo_batch
-from utils import (
+from utils import log
+from evaluation.metrics import validate_model, _prepare_yolo_batch
+from utils.model import (
     NOMINAL_BATCH_SIZE,
     accumulation_steps,
     load_checkpoint,
-    fetch_best_dict,
+    best_checkpoint_map50_95,
     set_loss_schedule,
 )
 
 from .losses import batch_losses
-from .reporting import format_duration, log_epoch_summary, quality_weight_stats, results_row
+from .reporting import format_duration, log_epoch_summary, quality_rows, quality_weight_stats, results_row
 from .schedule import WARMUP_EPOCHS, apply_warmup, lr_factor
 
 
@@ -56,8 +56,10 @@ def train_model(
     distillation term added to the detection loss. `distill_mode` "unweighted" compares features
     everywhere; "object" only inside each image's enlarged labelled boxes. "object-quality" is
     "object" with each image's loss scaled by its quality weight w = clip(s_e * c_t, 0, 1), so
-    the batch distillation loss is the mean of w_i * L_distill_i; each epoch then logs the mean,
-    minimum and maximum w and the fraction of images with w = 0.
+    the batch distillation loss is the mean of w_i * L_distill_i. That mode needs batches that
+    carry each image's event window (see yolo_collate_fn); each epoch then logs the mean, minimum
+    and maximum w and the fraction of images with w = 0, and adds every image's s_e, c_t and w
+    to quality_weights.csv.
     """
     if len(train_loader) == 0 or len(val_loader) == 0:
         message = "Training and validation loaders must both be non-empty."
@@ -72,8 +74,7 @@ def train_model(
     # disturbing the next epoch's value
     scheduler = LambdaLR(optimiser, lambda epoch: lr_factor(epoch, total_epochs))
 
-    checkpoint_info = load_checkpoint(latest_path, device, model, optimiser, ema, scheduler)
-    past_epochs = checkpoint_info["past_epochs"]
+    past_epochs = load_checkpoint(latest_path, device, model, optimiser, ema, scheduler)
     if past_epochs:
         logger.info("Resumed from %s after epoch %d", latest_path, past_epochs)
 
@@ -85,8 +86,7 @@ def train_model(
         )
 
     # Get the historical best stats so we only overwrite if we beat the previous best
-    best_stats = fetch_best_dict(checkpoint_path, device, model, optimiser, mode = 0)
-    best_map50_95 = best_stats["best_map50_95"]
+    best_map50_95 = best_checkpoint_map50_95(checkpoint_path, device)
 
     num_batches = len(train_loader)
     log_every = max(1, num_batches // 20)
@@ -124,14 +124,15 @@ def train_model(
         totals = {"loss": 0.0, "box_loss": 0.0, "cls_loss": 0.0, "l1_loss": 0.0}
         if teacher is not None:
             totals["distill_loss"] = 0.0
-        quality_weights = []  # Every training image's w this epoch ("object-quality" mode only)
+        epoch_quality_rows = []  
         images_seen = 0
         grad_norm = float("nan")
         epoch_start = time.monotonic()
         if device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(device)
 
-        for step, (imgs, targets) in enumerate(train_loader, start=1):
+        for step, (imgs, targets, *event_windows) in enumerate(train_loader, start=1):
+            event_windows = event_windows[0] if event_windows else None
 
             batch_index = epoch * num_batches + step - 1
             accumulate = full_accumulate
@@ -145,9 +146,12 @@ def train_model(
                 )
 
             batch_data = _prepare_yolo_batch(imgs, targets, device)
-            loss, loss_items, distill_loss, weight = batch_losses(model, batch_data, teacher, distill_mode)
-            if weight is not None:
-                quality_weights.append(weight)
+            loss, loss_items, distill_loss, quality = batch_losses(
+                model, batch_data, teacher, distill_mode,
+                event_coverage=None if event_windows is None else event_windows["coverage"],
+            )
+            if quality is not None:
+                epoch_quality_rows += quality_rows(epoch + 1, event_windows, quality)
 
             total_loss = loss.sum()
             if distill_loss is not None:
@@ -209,7 +213,7 @@ def train_model(
         scheduler.step()
         train_time = time.monotonic() - epoch_start
         train_results = {name: total / num_batches for name, total in totals.items()}
-        weight_stats = quality_weight_stats(quality_weights)
+        weight_stats = quality_weight_stats(epoch_quality_rows)
 
         # Validate using the EMA model for smooth, stable metrics
         val_start = time.monotonic()
@@ -265,7 +269,9 @@ def train_model(
         )
         log_epoch_summary(logger, train_results, val_results, weight_stats, distill_mode, lambda_distill)
         row = results_row(epoch + 1, train_results, val_results, weight_stats, epoch_lr)
-        log.log_epoch_results(row, checkpoint_path.parent)
+        log.log_epoch_results(row, checkpoint_path.parent, logger)
+        if epoch_quality_rows:
+            log.log_quality_weights(epoch_quality_rows, checkpoint_path.parent)
 
     if not checkpoint_path.is_file():
         message = "No best checkpoint was saved during this run."

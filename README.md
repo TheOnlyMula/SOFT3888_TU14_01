@@ -8,49 +8,49 @@ Our capstone project for SOFT3888 aims to address the drawbacks of RGB cameras i
 
 ```text
 SOFT3888_TU14_01/
-├── README.md
-├── environment.yml
-├── .gitignore
-├── dataset_loader.py
-├── augment.py
-├── darkening.py
-├── overexposure.py
-├── distillation.py
-├── training/
-│   ├── __init__.py
-│   ├── cli.py
-│   ├── run.py
-│   ├── loop.py
-│   ├── losses.py
-│   ├── schedule.py
-│   └── reporting.py
-├── train_distilled_student.py
-├── train_rgb_student.py
+├── train_rgb_student.py        entry points: thin scripts that call into the packages
 ├── train_teacher.py
+├── train_distilled_student.py
 ├── evaluate.py
-├── benchmark_reporting.py
 ├── overfit.py
-├── utils.py
-├── log.py
-├── docs/
-│   └── event_scale.json, darkening and overexposure guides
-├── tests/
-│   └── regression and smoke tests
-├── tools/
-│   └── utilities for exports, diagnostics, and smoke checks
+├── loaders/                    DSEC dataset, causal event windows, DataLoaders, augmentation
+│   ├── dataset_loader.py
+│   └── augment.py
+├── degradation/                RGB degradations for the benchmark and degradation augmentation
+│   ├── strength.py
+│   ├── conditions.py
+│   ├── darkening.py
+│   └── overexposure.py
+├── training/                   training loop, losses and the training-only distillation code
+│   ├── cli.py, run.py, loop.py, losses.py, schedule.py, reporting.py
+│   ├── distillation.py
+│   └── overfit.py
+├── evaluation/                 validation, test and benchmark metrics; evaluate.py's command line
+│   ├── metrics.py
+│   ├── benchmark_reporting.py
+│   └── cli.py
+├── utils/                      shared helpers
+│   ├── model.py
+│   └── log.py
+├── configs/                    one frozen config per experiment in the main comparison
+├── docs/                       degradation guides and measured constants (event_scale.json, event_density.json)
+├── tests/                      regression and smoke tests
+├── tools/                      measurement, example-generation, comparison and visualisation scripts
+├── environment.yml
 │
 │   Not in Git (created during setup, see "Environment setup"):
-├── DSEC-det/        official DSEC detection utilities, cloned into the project root
-├── yolo26n.pt       pretrained weights, downloaded automatically on the first run
-├── runs/            training outputs and logs
-└── DSEC_ROOT/       the dataset; may live anywhere, passed with --dataset-path
-    ├── train/       training and validation sequences
-    └── test/        test sequences
+├── DSEC-det/                   official DSEC detection utilities, cloned into the project root
+├── yolo26n.pt                  pretrained weights, downloaded automatically on the first run
+├── checkpoints/teacher.pt      the trained teacher, copied here for the distillation configs
+├── runs/                       training outputs and logs
+└── DSEC_ROOT/                  the dataset; may live anywhere, passed with --dataset-path
+    ├── train/                  training and validation sequences
+    └── test/                   test sequences
 ```
 
 ## Core components
 
-### dataset_loader.py
+### loaders/dataset_loader.py
 
 This file defines the DSEC dataset access layer. It creates a custom dataset that:
 
@@ -61,9 +61,9 @@ This file defines the DSEC dataset access layer. It creates a custom dataset tha
 - supports both RGB-only and fused RGB + event training paths,
 - augments the training split when `augment=True` (see below).
 
-Images and labels come from the DSEC detector utilities. For real-time detection, each RGB image is paired only with events from the 50 ms _before_ its timestamp (`load_causal_events` in `dataset_loader.py`), so the model never sees events that happen after the image. DSECDet's own `sync` windows are not used for events: `sync="back"` returns the 50 ms after the image, and `sync="front"` pairs the image with the previous frame's labels. The first frame of each sequence has no preceding events, so its event channels are empty.
+Images and labels come from the DSEC detector utilities. For real-time detection, each RGB image is paired only with events from the 50 ms _before_ its timestamp (`load_causal_events` in `loaders/dataset_loader.py`), so the model never sees events that happen after the image. DSECDet's own `sync` windows are not used for events: `sync="back"` returns the 50 ms after the image, and `sync="front"` pairs the image with the previous frame's labels. The first frame of each sequence has no preceding events, so its event channels are empty.
 
-### augment.py
+### loaders/augment.py
 
 Training-time augmentation, used by every model so student comparisons stay matched. One random draw moves the RGB pixels, the event pixels and the boxes together, so events stay aligned with the RGB the student sees:
 
@@ -72,6 +72,10 @@ Training-time augmentation, used by every model so student comparisons stay matc
 - hue shift and saturation jitter on the RGB channels only (hue moves by the same amount for every colour, as in Ultralytics 8.4). Brightness is left alone because brightness shifts belong to the degradation-augmentation baseline.
 
 Pixels uncovered by the zoom or shift are grey (114) in RGB and 0 in the event channels, since any other event value would invent events. Boxes that end up mostly outside the image, or cut into slivers more than 100 times longer than wide, are dropped. Every sample makes the same random draws with or without events, so for the same `--seed` the RGB student and the distilled student see identical augmented RGB.
+
+### degradation/
+
+The RGB degradations. `darkening.py` and `overexposure.py` are the image transforms (see the end of this README); both take the shared strength scale of `strength.py`, where 0 leaves an image unchanged and `mild` (0.35) and `strong` (1.0) name the benchmark levels. `conditions.py` seeds them deterministically for the degraded evaluation benchmark and samples the random conditions of the degradation-augmentation training baseline (`--degradation-augmentation`).
 
 ### training/
 
@@ -100,26 +104,16 @@ The pipeline:
 
 ### train_distilled_student.py
 
-Trains the RGB student with feature distillation from a frozen RGB + event teacher (`distillation.py`). Training batches carry RGB + event channels: the teacher sees all of them, the student only the RGB ones. Validation and test stay RGB-only, so student results never depend on event data.
+Trains the RGB student with feature distillation from a frozen RGB + event teacher (`training/distillation.py`). Training batches carry RGB + event channels: the teacher sees all of them, the student only the RGB ones. Validation and test stay RGB-only, so student results never depend on event data.
 
 ```bash
-python train_distilled_student.py \
-  --dataset-path "/path/to/DSEC_ROOT" \
-  --epochs 50 \
-  --teacher-checkpoint runs/teacher/exp_xxx/best_teacher_yolo.pt \
-  --lambda-distill 1.0 \
-  --distill-mode object
+python train_distilled_student.py --config configs/object_distillation.yaml --dataset-path dataset --num-workers 8
 
 # Same run with each image's object-aware loss scaled by the quality weight w
-python train_distilled_student.py \
-  --dataset-path "/path/to/DSEC_ROOT" \
-  --epochs 50 \
-  --teacher-checkpoint runs/teacher/exp_xxx/best_teacher_yolo.pt \
-  --lambda-distill 1.0 \
-  --distill-mode object-quality
+python train_distilled_student.py --config configs/proposed_event.yaml --dataset-path dataset --num-workers 8
 ```
 
-A teacher checkpoint must exist first (see [Teacher RGB + event training](#teacher-rgb--event-training)). Distilled runs are saved to `runs/distill/exp_NNN/`, with the best weights in `best_distill_yolo.pt`. Evaluate them with `evaluate.py --type student`, because the distilled student takes RGB input only.
+The distillation configs read the frozen teacher from `checkpoints/teacher.pt`, so train the teacher first and copy its `best_teacher_yolo.pt` there (see [Experiment configs](#experiment-configs)). Distilled runs are saved to `runs/distill/exp_NNN/`, with the best weights in `best_distill_yolo.pt`. Evaluate them with `evaluate.py --type student`, because the distilled student takes RGB input only.
 
 The distillation loss is the smooth L1 distance between the student's and the frozen teacher's one-to-many P3 neck features (stride 8). Student and teacher share an architecture, so the features match without a projection layer. `--distill-mode` chooses where it is applied:
 
@@ -129,33 +123,31 @@ The distillation loss is the smooth L1 distance between the student's and the fr
 
 #### Quality weight (`object-quality` mode)
 
-For each training image `i`, `distillation.quality_weight` combines:
+For each training image `i`, `training.distillation.quality_weight` combines:
 
-- `s_e`, the normalised event density: `event_density` of the teacher's 5-channel input (described below).
-- `c_t`, the mean teacher confidence over its retained detections: `teacher_confidence` averages the confidence of the frozen teacher's end-to-end detections at or above `TEACHER_CONFIDENCE_THRESHOLD` (0.25). An image with no retained detection gets `c_t = 0`. The training step computes `c_t` once per batch from the same teacher forward pass used for distillation, in every distillation mode, and `object-quality` reuses it.
-- `w_i = clip(s_e * c_t, 0, 1)`, which always lies in [0, 1]. An empty event window or a teacher that detects nothing confidently gives `w_i = 0`.
+- `s_e`, the normalised event density. The dataset measures the coverage of the image's causal 50 ms event window (`loaders.dataset_loader.event_coverage`: the fraction of pixels where either polarity saw at least one event) before augmentation, which would otherwise change it by zooming and interpolating the histogram. `training.distillation.event_density` divides it by the fixed `EVENT_DENSITY_REFERENCE` and clips it to 1, so no events gives 0 and a window at least as dense as the reference gives 1.
+- `c_t`, the mean confidence of the frozen teacher's detections at or above `TEACHER_CONFIDENCE_THRESHOLD` (0.25), or 0 when there are none (`training.distillation.teacher_confidence`). The teacher is loaded end-to-end, so its output is already the final detections and no NMS is needed.
+- `w_i = clip(s_e * c_t, 0, 1)`. Neither factor carries a gradient, so nothing in `w` is learned.
 
-`w` is computed and applied only in `object-quality` mode. It is detached and has no parameters: nothing in it is learned and no gradient flows through it, so an image with `w_i = 0` sends no distillation gradient to the student (its detection loss still trains as normal). The batch distillation loss is
+The batch distillation loss is
 
 ```
 L_distill = (1 / B) * sum_i  w_i * L_distill_i
 ```
 
-where `L_distill_i` is image `i`'s object-aware loss and `B` is the number of images in the batch (`distillation.quality_weighted_loss`). The mean runs over every image, including those with `w_i = 0`, so down-weighting an image lowers the batch loss rather than handing its share to the other images. This loss then enters the total loss as `lambda_distill * L_distill` (proposal eq. 1), exactly as in the other modes.
+where `L_distill_i` is image `i`'s object-aware loss and `B` is the number of images in the batch. The mean runs over every image, including those with `w_i = 0`, so down-weighting an image lowers the batch loss rather than handing its share to the other images. With every `w_i = 1` this is exactly the `object` loss. It enters the total loss as `lambda_distill * L_distill` (proposal eq. 1), as in the other modes.
 
-Each epoch adds the mean, minimum and maximum `w` over that epoch's training images, and the fraction of images with `w = 0`, to `train.log`:
+`EVENT_DENSITY_REFERENCE` is the median event coverage over every training frame, so a window at least as dense as the typical frame counts as fully reliable and only sparser windows are down-weighted. It is measured once with `python tools/measure_event_density.py --dataset-path /path/to/DSEC` and recorded in `docs/event_density.json`, in the same way `EVENT_SCALE_K` is recorded in `docs/event_scale.json`.
+
+Each epoch adds the mean, minimum and maximum `w` and the fraction of images with `w = 0` to `train.log`:
 
 ```
   train quality_weight mean = 0.4120 min = 0.0000 max = 0.9310 zero_fraction = 0.0850
 ```
 
-and to `results.csv` as `train/quality_weight_mean`, `train/quality_weight_min`, `train/quality_weight_max` and `train/quality_weight_zero_fraction`. These columns appear only in `object-quality` runs and are not drawn in `results.png`. This mode needs `docs/event_density_reference.json` (see below) and stops before training if it is missing.
+and to `results.csv` as `train/quality_weight_mean`, `train/quality_weight_min`, `train/quality_weight_max` and `train/quality_weight_zero_fraction` (not drawn in `results.png`). Every training image's values are also appended to `quality_weights.csv` in the run folder, one row per image and epoch (`epoch, sequence, frame, event_density, teacher_confidence, quality_weight`), for visualising the weights and finding the frames they down-weight.
 
 The mask and the quality weight are built in the training step only and are never part of evaluation or inference. Each epoch logs `distill_loss`, the mode and the weighted contribution to the total loss; `config.yaml` records the distillation mode, the teacher confidence threshold, the mask enlargement (`object` and `object-quality`) and the event-density reference (`object-quality`).
-
-`distillation.event_density(teacher_images)` computes a score for each frame from the same 5-channel input tensor passed to the teacher, whose event channels contain the causal 50 ms histogram. Coverage uses the whole frame: a pixel is active if either event polarity is positive, and each pixel counts once. The score is `clamp(active_pixels / (height * width) / reference, 0, 1)`. The fixed reference is loaded once per process from `docs/event_density_reference.json`; an explicit `reference` argument can also be supplied. It is separate from the per-pixel count scale `EVENT_SCALE_K`. No events gives 0; coverage at or above the reference gives 1. This score is `s_e` in the `object-quality` quality weight.
-
-Before final training, run `python tools/measure_event_density.py --dataset-path /path/to/DSEC` once. The tool creates `docs/event_density_reference.json` locally; this generated file is ignored by Git and should be retained with the training artifacts, rather than committed. The script requires all 41 configured training sequences, reads every training frame without augmentation, and uses the 90th percentile of whole-frame coverage (including empty frames), with linear percentile interpolation. It rejects validation/test splits and refuses to overwrite an existing JSON. Training and testing reuse the frozen reference; they never regenerate it. No reference config is supplied in this change. Boundary tests are deferred to a separate task.
 
 ### train_rgb_student.py and train_teacher.py
 
@@ -166,18 +158,18 @@ Thin entry points into the `training` package. The two models are trained identi
 
 Both accept the same arguments (`--dataset-path`, `--epochs`, `--batch-size`, `--num-workers`, `--max-samples`, `--skip-test`, `--seed`, `--no-augment`, `--resume`, `--console-level`). Use the same `--seed` for every student you compare; it fixes model initialisation, the shuffle order and the augmentation draws.
 
-### evaluate.py
+### evaluation/ and evaluate.py
 
-This file holds the evaluation used for both per-epoch validation and the final test step, so validation and test numbers are computed identically. In a single pass over the data it:
+`evaluation/metrics.py` holds the evaluation used for both per-epoch validation and the final test step, so validation and test numbers are computed identically. `evaluate.py` is the command-line entry point (its options are in `evaluation/cli.py`), and `evaluation/benchmark_reporting.py` exports and compares benchmark results. The evaluation package never imports `training`, so the RGB-only evaluation path stays free of the teacher and the other training-only components. In a single pass over the data it:
 
 - computes the per-image loss (box, class, L1),
-- computes precision, recall, mAP@0.5, mAP@0.5:0.95 and class-agnostic mAP@0.5 (all classes merged, to separate missed objects from wrong classes),
+- computes precision, recall, mAP@0.5 and mAP@0.5:0.95,
 - reports per-class results,
 - for the test step, restores the best checkpoint and saves the confusion matrix, PR curves and example predictions to `runs/<role>/exp_NNN/test/`.
 
-### utils.py
+### utils/
 
-This module contains shared utility functions for:
+`utils/log.py` creates the numbered run folders, loggers, `config.yaml` and `results.csv`. `utils/model.py` contains shared functions for:
 
 - selecting the correct compute device,
 - extracting trainable layers from the YOLO model,
@@ -230,7 +222,7 @@ Keep the environment active for every step that follows.
 
 ### 3. Install the DSEC detection utilities
 
-The repo depends on the external `DSEC-det` package for dataset parsing and labelling support. Clone it **inside the project root**: `dataset_loader.py` reads the train/val/test split from `DSEC-det/config/train_val_test_split.yaml` relative to the project root, and stops with `FileNotFoundError` if the folder is anywhere else.
+The repo depends on the external `DSEC-det` package for dataset parsing and labelling support. Clone it **inside the project root**: `loaders/dataset_loader.py` reads the train/val/test split from `DSEC-det/config/train_val_test_split.yaml` relative to the project root, and stops with `FileNotFoundError` if the folder is anywhere else.
 
 ```bash
 git clone https://github.com/uzh-rpg/DSEC-det.git
@@ -316,11 +308,32 @@ Each sequence needs all four of: `images/timestamps.txt`, the distorted RGB fram
 | A sequence's `images/left/distorted/` folder | `IndexError: list index out of range` at the first batch that reaches that sequence. |
 | `timestamps.txt`, `tracks.npy` or `events.h5` | `FileNotFoundError` while the dataset loads or at the first affected batch. RGB-only runs never open `events.h5`, so a missing event file only breaks teacher and distillation runs. |
 | Part of a file, from an interrupted download or unzip | An `OSError` from h5py or NumPy when the file is opened or read, or an OpenCV error on an unreadable image. |
-| Any of the 41 training sequences, for `--distill-mode object-quality` | `tools/measure_event_density.py` refuses to run and lists the missing sequences, so `docs/event_density_reference.json` is never created and `object-quality` training cannot start. |
+| Any of the 41 training sequences, when re-measuring the event-density reference | `tools/measure_event_density.py` stops with `Complete training split required; missing sequences: ...`. Training is not blocked: it uses the committed `docs/event_density.json`. |
 
 If any of these appear, re-run the download scripts for the affected split and confirm each sequence folder has the four items listed above. To check the code on a smaller copy without a full download, use `--max-samples` (see [Smoke checks](#smoke-checks-and-diagnostics)); results from a partial dataset are not comparable with the report.
 
 ## Training pipeline
+
+### Experiment configs
+
+Each model in the main comparison (proposal section 4.1) has a frozen config in `configs/`, so every run of it uses the same settings and the five students are guaranteed to match in epochs, batch size, seed and augmentation (a test checks this). Only `rgb_augmented` trains on degraded images: the teacher and the distilled students train on undegraded images, so the distilled students learn any robustness from the teacher's event supervision rather than from seeing degradations, and `rgb_augmented` is the alternative they are compared against. The teacher alone uses modality dropout (`rgb_dropout: 0.15`, see the teacher section). Pass it with `--config`, and give the machine-specific options on the command line:
+
+```bash
+python train_rgb_student.py --config configs/rgb_baseline.yaml --dataset-path dataset --num-workers 8
+```
+
+| Config | Script | Comparison row | Benchmark `--model-name` |
+| --- | --- | --- | --- |
+| `rgb_baseline.yaml` | `train_rgb_student.py` | 1. RGB-only student | `rgb_baseline` |
+| `rgb_augmented.yaml` | `train_rgb_student.py` | 2. RGB student with degradation augmentation | `rgb_augmented` |
+| `naive_distillation.yaml` | `train_distilled_student.py` | 3. Basic unweighted distillation | `naive_distillation` |
+| `object_distillation.yaml` | `train_distilled_student.py` | 4. Object-aware distillation | `object_distillation` |
+| `proposed_event.yaml` | `train_distilled_student.py` | 5. Quality-weighted object-aware distillation | `proposed_event` |
+| `teacher.yaml` | `train_teacher.py` | 6. Privileged teacher (training reference) | `teacher` |
+
+A config's keys are the command-line options with underscores (`batch_size: 6` is `--batch-size 6`, `degradation_augmentation: true` is the bare flag). Options typed on the command line override the config, e.g. `--epochs 1 --max-samples 16` for a quick check. The distillation configs read the frozen teacher from `checkpoints/teacher.pt`: once the teacher is trained, copy its `best_teacher_yolo.pt` there (`.pt` files are not committed). Each run records the full command with the config's settings spelled out (`run_command.txt`, `run_args.yaml`) and the config's path (`config.yaml`), so `--resume` repeats the run exactly even if the config is edited later; `--config` cannot be combined with `--resume`.
+
+All the options below can also be set in a config.
 
 ### Student RGB-only training
 
@@ -356,7 +369,7 @@ The script does the following:
 - saves the model with the highest validation mAP50-95,
 - runs a final test evaluation unless `--skip-test` is provided.
 
-Enable a random degradation mix for RGB-only student training:
+Enable a random degradation mix for training:
 
 ```bash
 python train_rgb_student.py \
@@ -380,10 +393,11 @@ For each degraded image, strength is drawn uniformly
 from the selected condition's range. Both ranges default to the benchmark's
 `mild` (0.35) through `strong` (1.0) levels. Bounds must satisfy
 `0 <= MIN <= MAX <= 1`; equal bounds give a fixed strength. Clean images do not
-draw a strength. Darkening uses `darkening.darken`, mapped onto this strength
+draw a strength. Darkening uses `degradation.darkening.darken`, mapped onto this strength
 scale exactly as in the benchmark (see below).
-These options are for the RGB-only student without a teacher checkpoint and do
-not change benchmark settings.
+With event channels (the teacher and the distilled students) only the RGB
+channels are degraded and the events stay clean, so the teacher learns to rely on
+them when the RGB is poor. These options do not change benchmark settings.
 
 `--augmentation-seed` (default `0`, non-negative integer) controls a dedicated
 random stream for condition selection, strength and darkening noise. It is
@@ -391,7 +405,9 @@ independent of the benchmark's `--evaluation-seed` and global NumPy/PyTorch RNGs
 Each loader worker has its own stream, which advances across epochs. The same
 seed reproduces the augmentation sequence for the same sample order, batch size
 and worker count; this seed does not control training shuffle or model randomness.
-Changing the worker count can change the augmentation sequence. Augmentation RNG
+Changing the worker count can change the augmentation sequence, so give every run in the
+comparison the same `--num-workers`: then the distilled students see exactly the same degraded
+RGB views as `rgb_augmented`. Augmentation RNG
 state is not checkpointed, so restarting a loader restarts its streams.
 
 Every run's `runs/student/exp_XXX/config.yaml` records `Training Augmentation`:
@@ -410,7 +426,7 @@ python train_teacher.py \
   --epochs 1
 ```
 
-This path uses the event histogram generated from event polarity, stacking it alongside RGB features before feeding the model.
+This path uses the event histogram generated from event polarity, stacking it alongside RGB features before feeding the model. The teacher trains with the ordinary detection loss only: the object mask and the quality weight belong to the student's distillation loss. Its first layer takes 5 channels, so it cannot load the pretrained 3-channel weights directly; instead its RGB filters are copied from them and its event filters start at zero (`build_model` in `utils/model.py`). The teacher therefore starts as exactly the pretrained RGB detector, like the student, and learns from there how much to use the events. A teacher trained this way leans almost entirely on RGB: its RGB path starts pretrained, the DSEC labels come from an RGB tracker, and most frames are well lit, so zeroing its events cost only 0.013 mAP50-95. `configs/teacher.yaml` therefore uses modality dropout (`--rgb-dropout 0.15`): the RGB of 15% of training images is blanked while their events and labels are kept, so the teacher must also learn to detect from events. The rate follows Tomy et al. (ICRA 2022), who trained RGB + event detectors on DSEC with image dropout at 0.15. It applies to the teacher only; a student's RGB is never blanked.
 
 ## Evaluation workflow
 
@@ -438,7 +454,7 @@ python evaluate.py \
   --num-workers 8
 ```
 
-Both models use the stock Ultralytics YOLO26n architecture with an 8-class DSEC head (built by `build_model` in `utils.py`). The `--type` argument sets the number of input channels:
+Both models use the stock Ultralytics YOLO26n architecture with an 8-class DSEC head (built by `build_model` in `utils/model.py`). The `--type` argument sets the number of input channels:
 
 - `student` -> 3 channels (RGB)
 - `teacher` -> 5 channels (RGB + 2 event histogram channels)
@@ -467,9 +483,9 @@ PYTHONPATH=. python evaluate.py \
 
 The benchmark reports mAP@0.5, mAP@0.5:0.95, recall, and the performance drop from the clean condition.
 
-`--degradation-strength` accepts the named levels `mild` (0.35) and `strong` (1.0) defined in `overexposure.py`, or a number in [0, 1]. The same value is used for the darkened and over-exposed conditions, and over-exposure is applied by `overexposure.overexpose`.
+`--degradation-strength` accepts the named levels `mild` (0.35) and `strong` (1.0) defined in `degradation/strength.py`, or a number in [0, 1]. The same value is used for the darkened (`degradation.darkening.darken`) and over-exposed (`degradation.overexposure.overexpose`) conditions.
 
-Darkening is applied by `darkening.darken`, which works on an illumination scale instead (1 = unchanged). The benchmark strength maps linearly onto it: `illumination = 1 - 0.8 * strength`, so strength 0 leaves images unchanged, `mild` (0.35) dims to 72% illumination and `strong` (1.0) dims to darkening's own `strong` level (20%). Each frame's illumination field and sensor noise come from its per-frame seed. The degradation-augmentation baseline uses the same mapping, so its training darkening matches this benchmark condition.
+Darkening is applied by `degradation.darkening.darken`, which works on an illumination scale instead (1 = unchanged). The benchmark strength maps linearly onto it: `illumination = 1 - 0.8 * strength`, so strength 0 leaves images unchanged, `mild` (0.35) dims to 72% illumination and `strong` (1.0) dims to darkening's own `strong` level (20%). Each frame's illumination field and sensor noise come from its per-frame seed. The degradation-augmentation baseline uses the same mapping, so its training darkening matches this benchmark condition.
 
 The evaluation seed keeps benchmark inputs reproducible. Each condition also produces an RGB fingerprint, which can be compared between runs to confirm that the same input images were evaluated.
 
@@ -485,7 +501,7 @@ After the evaluation code is committed, run each checkpoint with the same datase
   --benchmark-report runs/benchmark_reports/rgb_baseline.json
 ```
 
-Choose a `--dataset-id` that identifies the **actual image and annotation version** used by the team; the example is only a placeholder. Use a different report path and one of `rgb_baseline`, `rgb_augmented`, `naive_distillation`, `proposed_event`, or `teacher` for each checkpoint. For the teacher, use `--type teacher --model-name teacher`. The exported JSON records the checkpoint path and SHA-256 hash, code commit and clean/dirty state, dataset ID and path, test split, seed, strength, sample limit, parameter count, metrics, and per-condition RGB fingerprints. It contains measured results only; it does not create a score for a model that has not been evaluated.
+Choose a `--dataset-id` that identifies the **actual image and annotation version** used by the team; the example is only a placeholder. Use a different report path and one of `rgb_baseline`, `rgb_augmented`, `naive_distillation`, `object_distillation`, `proposed_event`, or `teacher` for each checkpoint (the names of the configs in `configs/`). For the teacher, use `--type teacher --model-name teacher`. The exported JSON records the checkpoint path and SHA-256 hash, code commit and clean/dirty state, dataset ID and path, test split, seed, strength, sample limit, parameter count, metrics, and per-condition RGB fingerprints. It contains measured results only; it does not create a score for a model that has not been evaluated.
 
 When reports are available, combine them with:
 
@@ -514,7 +530,7 @@ channel = min( log1p(count) / log1p(EVENT_SCALE_K), 1 )
 - Training and validation are both performed on labelled subsets, while test evaluation is reserved for final measurement.
 - The code expects a valid DSEC root path with all required subdirectories aligned to the same sequence ID.
 - On Windows, prefer ASCII-only dataset paths when possible because OpenCV and some file-handling utilities can sometimes fail on non-ASCII characters.
-- The training pipeline saves both a best checkpoint and a latest checkpoint after every epoch. To continue an interrupted run in the same folder, pass only its folder: `python train_rgb_student.py --resume runs/student/exp_006`. The settings come from the original run (`run_args.yaml`, or `run_command.txt` for older runs); only `--num-workers` and `--console-level` may be given again. Model, optimiser, EMA and schedules continue exactly, but the shuffle order and augmentation draws after the resume point differ from an uninterrupted run.
+- The training pipeline saves both a best checkpoint and a latest checkpoint after every epoch. To continue an interrupted run in the same folder, pass only its folder: `python train_rgb_student.py --resume runs/student/exp_006`. The settings come from the original run (`run_args.yaml`); only `--num-workers` and `--console-level` may be given again. Model, optimiser, EMA and schedules continue exactly, but the shuffle order and augmentation draws after the resume point differ from an uninterrupted run.
 
 ## Testing and validation
 
@@ -524,11 +540,11 @@ Run the unit and integration checks from the repository root:
 python -m unittest discover -s tests -v
 ```
 
-The test suite covers the project’s expected data-loading and training workflow behaviour. It uses synthetic data, so it runs without the dataset. `tests/test_overexposure_night.py` also checks real DSEC night frames when the `DSEC_ROOT` environment variable is set (`DSEC_ROOT=/path/to/DSEC_ROOT python -m unittest discover -s tests`); otherwise it is skipped.
+The test suite covers the project’s expected data-loading and training workflow behaviour. It uses synthetic data, so it runs without the dataset. `tests/test_overexposure_reference.py` also checks real DSEC reference frames when the `DSEC_ROOT` environment variable is set (`DSEC_ROOT=/path/to/DSEC_ROOT python -m unittest discover -s tests`); otherwise it is skipped.
 
 ## Smoke checks and diagnostics
 
-The quickest end-to-end check is a one-epoch run on a few frames. It takes seconds, even on a CPU:
+The quickest end-to-end check is a one-epoch run on a few evenly spaced frames from each split. It takes seconds, even on a CPU:
 
 ```bash
 python train_rgb_student.py \
@@ -538,17 +554,7 @@ python train_rgb_student.py \
   --skip-test
 ```
 
-It should finish with `Test evaluation skipped (--skip-test).` and write `best_student_yolo.pt` to a new `runs/student/exp_NNN/`. Drop `--skip-test` to also exercise the test split. Swap in `train_teacher.py` to check the event files as well.
-
-The repository also includes a helper for a fuller integration check on small disjoint subsets. It needs both `train/` and `test/` under the dataset root and a new output folder:
-
-```bash
-python tools/run_issue17_smoke.py --dataset-root "/path/to/DSEC_ROOT" --output-dir "runs/issue17_verify"
-```
-
-On Windows with a venv: `.\.venv\Scripts\python.exe tools/run_issue17_smoke.py --dataset-root "D:\DSEC_ROOT" --output-dir "D:\DSEC_issue17_verify"`.
-
-These checks validate the pipeline without a full training run across the whole dataset.
+It should finish with `Test evaluation skipped (--skip-test).` and write `best_student_yolo.pt` to a new `runs/student/exp_NNN/`. Drop `--skip-test` to also exercise the test split. Swap in `train_teacher.py` to check the event files as well. `--max-samples` also works with a config, e.g. `--config configs/rgb_baseline.yaml --epochs 1 --max-samples 16`.
 
 ## Expected outputs
 
@@ -559,6 +565,7 @@ Each training run creates a new numbered folder, `runs/<role>/exp_NNN/`, where `
 - `results.csv` and `results.png`: per-epoch metrics and training curves
 - `best_<role>_yolo.pt`: the checkpoint with the highest validation mAP50-95
 - `latest_<role>_yolo.pt`: the most recent checkpoint, for resuming
+- `quality_weights.csv`: each training image's `s_e`, `c_t` and `w` per epoch (`object-quality` runs only)
 - `test/`: confusion matrix, PR curves and example predictions from the final test step (absent with `--skip-test`)
 
 ## Troubleshooting
@@ -571,7 +578,82 @@ If training or evaluation fails, check the following first:
 4. `FileNotFoundError` for `DSEC-det/config/train_val_test_split.yaml`: `DSEC-det` must be cloned inside the project root.
 5. `mamba env create` fails with `pytorch-cuda =12.1 * does not exist`: you are on macOS; use the venv route in step 2.
 6. Run every script from the project root, so `yolo26n.pt`, `docs/` and `runs/` are found.
-7. Ensure the checkpoint path passed to `--weights` or `--teacher-checkpoint` exists.
+7. Ensure the checkpoint path passed to `--weights` or `--teacher-checkpoint` exists. The distillation configs expect the trained teacher at `checkpoints/teacher.pt`.
 8. Check that the environment matches the required Python and dependency versions.
 
 This project is meant to serve as a full training and evaluation workflow for DSEC-based RGB and RGB + event detection experiments. It is especially useful for experimenting with student–teacher knowledge transfer and multi-modal perception pipelines in a structured and reproducible setup.
+
+## Deterministic overexposure
+
+`overexpose(image, strength)` returns a new, same-shape `uint8` RGB array
+without randomness or input mutation. Input is a non-empty `H x W x 3` array;
+convert BGR to RGB and apply it before tensor normalization or event concatenation.
+
+```python
+from degradation.overexposure import overexpose
+mild_rgb = overexpose(rgb, "mild")
+strong_rgb = overexpose(rgb, "strong")
+custom_rgb = overexpose(rgb, 0.6)  # Continuous strength in [0, 1].
+```
+
+| Preset | Strength | Gamma | Normalized offset |
+| --- | ---: | ---: | ---: |
+| mild | 0.35 | 0.79 | 0.14 |
+| strong | 1.00 | 0.40 | 0.40 |
+
+The offset was calibrated on 400 training frames so that `strong` saturates (all RGB channels equal 255) a median 23% of a typical frame: severe, but objects stay visible. An earlier offset of 0.6 whitened a median 72.5% of daytime frames, and every model scored 0 mAP on it; see the [detailed guide](docs/overexposure/README.md#calibration).
+
+[Day examples](docs/overexposure/day_000007.png) and
+[night examples](docs/overexposure/night_000300.png) show clean/mild/strong.
+See the [detailed guide](docs/overexposure/README.md) for the formula and measured results.
+
+Generate examples and descriptive measurements into a new output directory:
+
+```bash
+python tools/generate_overexposure_examples.py --image "/path/to/rgb.png" --output-dir "runs/overexposure_examples/sample_01"
+```
+
+## Deterministic darkening
+
+`darken(image, strength, seed=0)` takes:
+- `image`: a non-empty `H x W x 3` RGB array with dtype `uint8` (convert OpenCV's BGR to RGB first),
+- `strength`: the benchmark's shared strength, `"mild"` (0.35), `"strong"` (1.0) or a number in [0, 1], exactly as for `overexpose`. 0 leaves the image unchanged,
+- `seed`: an integer fixing the illumination draw, the illumination field and the noise.
+
+It returns a dictionary:
+```python
+{
+  'image': ...,                # a new, same-shape uint8 darkened RGB array with sensor noise
+  'seed': ...,                 # the seed used
+  'global_illum_factor': ...,  # the global illumination factor drawn for this image (see below)
+  'mean_brightness': ...,      # mean linear brightness before noise
+  'proportion_dark': ...,      # proportion of pixels at or below 1% linear light in every channel, before noise
+}
+```
+
+```python
+from degradation.darkening import darken
+mild_rgb = darken(rgb, "mild", seed=1234)["image"]
+strong_rgb = darken(rgb, "strong", seed=1234)["image"]
+custom_rgb = darken(rgb, 0.6, seed=1234)["image"]  # any strength in [0, 1]
+```
+
+The illumination level falls linearly with strength, from 1 (unchanged) at strength 0 to `STRONG_ILLUMINATION` (0.2) at strength 1, and each image's global illumination factor is drawn uniformly within ±0.1 of that level, so no two frames are darkened identically:
+
+| Strength | Illumination level | Global illumination factor range |
+| --- | ---: | ---: |
+| 0 | 1.00 | unchanged |
+| mild (0.35) | 0.72 | [0.62, 0.82) |
+| strong (1.0) | 0.20 | [0.10, 0.30) |
+
+The image is dimmed in linear light by that factor times a smooth random illumination field (0.7 to 1.3), then given Poisson photon shot noise and Gaussian read noise.
+
+[Day examples](docs/darkening/day_000003.png) and
+[night examples](docs/darkening/night_000005.png) show the clean, mild and strong results, with the illumination factor, mean brightness and percentage of dark pixels, for `interlaken_00_c/000003.png` and `zurich_city_09_a/000005.png` (seed 1234).
+See the [detailed guide](docs/darkening/README.md) for more information.
+
+Generate examples and descriptive measurements into a new output directory:
+
+```bash
+python tools/generate_darkened_examples.py --image "/path/to/rgb.png" --output-dir "runs/darkening_examples/sample_01"
+```

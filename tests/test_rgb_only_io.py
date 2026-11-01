@@ -9,15 +9,15 @@ import h5py
 import numpy as np
 import torch
 
-import dataset_loader
-from dataset_loader import (
+from loaders import dataset_loader
+from loaders.dataset_loader import (
     EVENT_SCALE_K, DSECFusionDataset, load_causal_events, read_event_window, snapshot_directory_caches,
 )
 from dsec_det.io import extract_from_h5_by_timewindow
 
 
 class RgbOnlyIoTests(unittest.TestCase):
-    @patch("dataset_loader.DSECDet")
+    @patch("loaders.dataset_loader.DSECDet")
     def test_rgb_only_never_reads_events_and_preserves_targets(self, dataset_class):
         base = dataset_class.return_value
         base.__getitem__.side_effect = AssertionError("Must not load the paired sample")
@@ -35,7 +35,7 @@ class RgbOnlyIoTests(unittest.TestCase):
         self.assertTrue(torch.equal(images, torch.ones_like(images)))
         torch.testing.assert_close(targets, torch.tensor([[2.0, 0.25, 0.5, 0.25, 0.5]]))
 
-    @patch("dataset_loader.DSECDet")
+    @patch("loaders.dataset_loader.DSECDet")
     def test_images_are_converted_from_bgr_to_rgb(self, dataset_class):
         base = dataset_class.return_value
         bgr = np.zeros((4, 4, 3), dtype=np.uint8)
@@ -45,7 +45,7 @@ class RgbOnlyIoTests(unittest.TestCase):
         images, _ = DSECFusionDataset(Path("fake"), rgb_only=True)[0]
         self.assertEqual((images[:, 0, 0] * 255).round().tolist(), [30.0, 20.0, 10.0])
 
-    @patch("dataset_loader.DSECDet")
+    @patch("loaders.dataset_loader.DSECDet")
     def test_rgb_only_accepts_empty_detection_targets(self, dataset_class):
         base = dataset_class.return_value
         base.get_image.return_value = np.zeros((16, 16, 3), dtype=np.uint8)
@@ -55,9 +55,9 @@ class RgbOnlyIoTests(unittest.TestCase):
         self.assertEqual(targets.numel(), 0)
         base.__getitem__.assert_not_called()
 
-    @patch("dataset_loader.event_time_offset_us", return_value=0)
-    @patch("dataset_loader.read_event_window")
-    @patch("dataset_loader.DSECDet")
+    @patch("loaders.dataset_loader.event_time_offset_us", return_value=0)
+    @patch("loaders.dataset_loader.read_event_window")
+    @patch("loaders.dataset_loader.DSECDet")
     def test_fusion_mode_uses_only_events_before_the_image(self, dataset_class, extract, offset):
         base = dataset_class.return_value
         base.get_image.return_value = np.zeros((16, 16, 3), dtype=np.uint8)
@@ -85,7 +85,7 @@ class RgbOnlyIoTests(unittest.TestCase):
         self.assertEqual(int((histogram > 0).sum()), 1)
         self.assertEqual(targets.numel(), 0)
 
-    @patch("dataset_loader.DSECDet")
+    @patch("loaders.dataset_loader.DSECDet")
     def test_event_channels_are_scaled_into_the_unit_range(self, dataset_class):
         dataset = DSECFusionDataset(Path("fake"), rgb_only=False)
         events = {
@@ -103,7 +103,7 @@ class RgbOnlyIoTests(unittest.TestCase):
         self.assertGreaterEqual(histogram.min().item(), 0.0)
         self.assertLessEqual(histogram.max().item(), 1.0)
 
-    @patch("dataset_loader.DSECDet")
+    @patch("loaders.dataset_loader.DSECDet")
     def test_histogram_counts_match_per_pixel_accumulation(self, dataset_class):
         # DSEC dtypes (uint16 coordinates, uint8 polarity) and a non-square frame, so an index
         # that overflowed or swapped height and width would land events on the wrong pixel
@@ -124,9 +124,9 @@ class RgbOnlyIoTests(unittest.TestCase):
 
         torch.testing.assert_close(histogram, expected.clamp(max=1.0), rtol=0, atol=0)
 
-    @patch("dataset_loader.event_time_offset_us", return_value=1_020_000)
-    @patch("dataset_loader.read_event_window")
-    @patch("dataset_loader.DSECDet")
+    @patch("loaders.dataset_loader.event_time_offset_us", return_value=1_020_000)
+    @patch("loaders.dataset_loader.read_event_window")
+    @patch("loaders.dataset_loader.DSECDet")
     def test_event_window_is_clipped_to_recording_start(self, dataset_class, extract, offset):
         base = dataset_class.return_value
         directory = base.rel_index.return_value[2]
@@ -183,12 +183,12 @@ class EventFileReadingTests(unittest.TestCase):
                     np.testing.assert_array_equal(events[key], expected[key])
 
     def test_reuses_one_handle_per_process(self):
-        with patch("dataset_loader.h5py.File", wraps=h5py.File) as open_file:
+        with patch("loaders.dataset_loader.h5py.File", wraps=h5py.File) as open_file:
             read_event_window(self.path, 5_000_000, 5_010_000)
             read_event_window(self.path, 5_010_000, 5_020_000)
             self.assertEqual(open_file.call_count, 1)
             # A forked worker has a new process ID and opens its own handle
-            with patch("dataset_loader.os.getpid", return_value=-1):
+            with patch("loaders.dataset_loader.os.getpid", return_value=-1):
                 read_event_window(self.path, 5_000_000, 5_010_000)
             self.assertEqual(open_file.call_count, 2)
 

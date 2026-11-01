@@ -1,19 +1,34 @@
 {
   "status": "reference_sample_observations_not_dataset_wide_acceptance",
-  "module_sha256": "9659b2be3768302c9c6f9e49fce99c1ae3695ad18800683139aa03e6e1d654ed",
+  "module_sha256": "a9338f378200d29dc14bb0b72ab2df2f9c839bd0e541e759701c5a394c2cb244",
   "strength_levels": {
     "mild": 0.35,
     "strong": 1.0
   },
   "min_gamma": 0.4,
-  "max_brightness_offset": 0.6,
+  "max_brightness_offset": 0.4,
   "fully_saturated_definition": "All three RGB channels equal 255; denominator is every pixel",
-  "proposed_night_reference_floor_percent": 2.0,
-  "calibration_note": "Floor selected after inspecting these four named night reference frames; not held-out validation.",
+  "training_calibration": {
+    "frames": 400,
+    "selection": "evenly spaced over the 41 training sequences; validation and test frames not used",
+    "strong_fully_saturated_percent": {
+      "median": 23.2,
+      "p90": 39.1
+    },
+    "mild_fully_saturated_percent": {
+      "median": 1.4
+    },
+    "previous_max_brightness_offset": 0.6,
+    "previous_strong_fully_saturated_percent": {
+      "median": 72.5,
+      "p90": 86.4
+    }
+  },
+  "calibration_note": "max_brightness_offset chosen so that strong saturates about a fifth of a typical training frame. The previous 0.6 met a 2% floor on four night frames but whitened most daytime frames, so every model scored 0 mAP; that floor is retired because no setting meets it without that.",
   "samples": [
     {
       "image_path": "train/thun_00_a/images/left/distorted/000007.png",
-      "image_sha256": "efe0da8c524e6bf7ac902f4669b9bc7c44177793137dddd8fe5569e8a77a458b",
+      "image_sha256": "0ff2c92619faa0a4eee1b409b319922d55916e22f6bdf6a98c2cdaa89f78f8fc",
       "shape": [
         480,
         640,
@@ -21,19 +36,19 @@
       ],
       "metrics": {
         "clean": {
-          "mean_rgb": 65.99086154513888,
+          "mean_rgb": 65.99107855902778,
           "fully_saturated_percent": 0.0,
           "any_channel_saturated_percent": 0.0
         },
         "mild": {
-          "mean_rgb": 131.74829535590277,
-          "fully_saturated_percent": 5.538411458333333,
-          "any_channel_saturated_percent": 19.815104166666668
+          "mean_rgb": 115.29153862847222,
+          "fully_saturated_percent": 0.0,
+          "any_channel_saturated_percent": 14.799479166666666
         },
         "strong": {
-          "mean_rgb": 244.47577039930556,
-          "fully_saturated_percent": 64.16015625,
-          "any_channel_saturated_percent": 73.46028645833333
+          "mean_rgb": 212.86244466145834,
+          "fully_saturated_percent": 28.702473958333336,
+          "any_channel_saturated_percent": 29.3837890625
         }
       }
     },
@@ -52,14 +67,14 @@
           "any_channel_saturated_percent": 0.21712239583333331
         },
         "mild": {
-          "mean_rgb": 83.46577256944444,
-          "fully_saturated_percent": 0.13118489583333331,
-          "any_channel_saturated_percent": 0.3544921875
+          "mean_rgb": 65.60368055555556,
+          "fully_saturated_percent": 0.10611979166666667,
+          "any_channel_saturated_percent": 0.3157552083333333
         },
         "strong": {
-          "mean_rgb": 230.13146918402776,
-          "fully_saturated_percent": 5.427408854166667,
-          "any_channel_saturated_percent": 28.277994791666668
+          "mean_rgb": 182.54401150173612,
+          "fully_saturated_percent": 0.45377604166666663,
+          "any_channel_saturated_percent": 2.1396484375
         }
       }
     },
@@ -78,14 +93,14 @@
           "any_channel_saturated_percent": 0.6432291666666667
         },
         "mild": {
-          "mean_rgb": 85.03529296875,
-          "fully_saturated_percent": 0.021484375,
-          "any_channel_saturated_percent": 1.6334635416666667
+          "mean_rgb": 67.2683203125,
+          "fully_saturated_percent": 0.017903645833333332,
+          "any_channel_saturated_percent": 1.21484375
         },
         "strong": {
-          "mean_rgb": 229.22888346354168,
-          "fully_saturated_percent": 6.473307291666666,
-          "any_channel_saturated_percent": 30.138020833333336
+          "mean_rgb": 182.38205295138889,
+          "fully_saturated_percent": 1.14453125,
+          "any_channel_saturated_percent": 4.519205729166666
         }
       }
     },
@@ -104,14 +119,14 @@
           "any_channel_saturated_percent": 0.2275390625
         },
         "mild": {
-          "mean_rgb": 84.60915364583333,
-          "fully_saturated_percent": 0.1025390625,
-          "any_channel_saturated_percent": 0.4443359375
+          "mean_rgb": 66.73286675347222,
+          "fully_saturated_percent": 0.06868489583333334,
+          "any_channel_saturated_percent": 0.3623046875
         },
         "strong": {
-          "mean_rgb": 232.23218098958333,
-          "fully_saturated_percent": 3.7483723958333335,
-          "any_channel_saturated_percent": 30.4931640625
+          "mean_rgb": 184.48388454861112,
+          "fully_saturated_percent": 0.5618489583333333,
+          "any_channel_saturated_percent": 1.9407552083333335
         }
       }
     },
@@ -130,21 +145,21 @@
           "any_channel_saturated_percent": 0.07194010416666667
         },
         "mild": {
-          "mean_rgb": 79.26383029513889,
-          "fully_saturated_percent": 0.0224609375,
-          "any_channel_saturated_percent": 0.2864583333333333
+          "mean_rgb": 61.37798177083334,
+          "fully_saturated_percent": 0.015950520833333332,
+          "any_channel_saturated_percent": 0.21484375000000003
         },
         "strong": {
-          "mean_rgb": 225.71430121527777,
-          "fully_saturated_percent": 2.84375,
-          "any_channel_saturated_percent": 16.784505208333332
+          "mean_rgb": 176.6147808159722,
+          "fully_saturated_percent": 0.8352864583333333,
+          "any_channel_saturated_percent": 1.9710286458333333
         }
       }
     }
   ],
   "runtime": {
-    "python": "3.14.7",
-    "numpy": "2.5.2",
+    "python": "3.12.0",
+    "numpy": "2.4.3",
     "opencv": "4.13.0"
   }
 }

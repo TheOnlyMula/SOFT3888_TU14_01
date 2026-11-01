@@ -1,4 +1,5 @@
 from pathlib import Path
+import logging
 import numpy as np
 import cv2
 import argparse
@@ -7,12 +8,14 @@ import sys
 import hdf5plugin  # Required to prevent Blosc decompression error
 
 from ultralytics import YOLO
+from ultralytics.nn.autobackend import AutoBackend
+from ultralytics.utils import LOGGER
 from dsec_det.dataset import DSECDet
 from dsec_det.visualize import render_object_detections_on_image 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from utils import build_model, load_weights, select_device
-from dataset_loader import load_causal_events
+from utils.model import build_model, load_weights, select_device
+from loaders.dataset_loader import DSECFusionDataset, load_causal_events
 
 def create_video_writer(output_path, fps, width, height):
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
@@ -28,23 +31,10 @@ def add_title_to_image(img, title):
     cv2.putText(header, title, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2, cv2.LINE_AA)
     return np.vstack((header, img))
 
-def generate_event_histogram(events, height=480, width=640):
-    hist = np.zeros((2, height, width), dtype=np.float32)
-    if events is not None and len(events.get("x", [])) > 0:
-        x = events["x"].astype(int)
-        y = events["y"].astype(int)
-        p = events["p"].astype(int)
-        np.add.at(hist[0], (y[p == 0], x[p == 0]), 1)
-        np.add.at(hist[1], (y[p == 1], x[p == 1]), 1)
-    hist_tensor = torch.from_numpy(hist)
-    hist_tensor = torch.log1p(hist_tensor)
-    return hist_tensor
-
 def load_yolo_model(weights_path, ch, device):
     model = YOLO("yolo26n.yaml", task="detect")
     model.model = load_weights(build_model(ch), weights_path, device)
-
-    return model, ch
+    return model
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Generate AI vs GT Video for DSEC Det")
@@ -67,12 +57,16 @@ if __name__ == '__main__':
     student_model = None
     if args.student_weights is not None:
         print(f"Loading Student model from {args.student_weights}...")
-        student_model, _ = load_yolo_model(args.student_weights, 3, device)
+        student_model = load_yolo_model(args.student_weights, 3, device)
     
     teacher_model = None
     if args.teacher_weights is not None:
         print(f"Loading Teacher model from {args.teacher_weights}...")
-        teacher_model, _ = load_yolo_model(args.teacher_weights, 5, device)
+        teacher_model = load_yolo_model(args.teacher_weights, 5, device)
+        # Ultralytics warms predictors up with a 3-channel dummy image, which a 5-channel model rejects
+        AutoBackend.warmup = lambda *args, **kwargs: None
+        # Hide its harmless warning that the pre-scaled teacher input exceeds 1.0
+        LOGGER.setLevel(logging.ERROR)
         
     print("Models successfully loaded!")
     
@@ -133,26 +127,16 @@ if __name__ == '__main__':
             # The teacher is trained on RGB; cv2 frames are BGR.
             img_rgb = cv2.cvtColor(img_raw, cv2.COLOR_BGR2RGB)
             img_tensor = torch.from_numpy(img_rgb).permute(2, 0, 1).float() / 255.0
-            event_tensor = generate_event_histogram(events, height=img_raw.shape[0], width=img_raw.shape[1])
+            # The same histogram, scaled by EVENT_SCALE_K, as the teacher was trained on
+            event_tensor = DSECFusionDataset.generate_event_histogram(
+                events, height=img_raw.shape[0], width=img_raw.shape[1]
+            )
             fused_tensor = torch.cat((img_tensor, event_tensor), dim=0).unsqueeze(0).to(device)
             
             # Ultralytics predictor divides tensors by 255 if max > 1.0. Pre multiply to ensure correct magnitudes.
             fused_tensor *= 255.0
             
-            teacher_model.model.warmup = lambda *args, **kwargs: None
-            import ultralytics.nn.autobackend
-            ultralytics.nn.autobackend.AutoBackend.warmup = lambda *args, **kwargs: None
-            
-            # Temporarily suppress the Ultralytics logger to hide the harmless max value warning
-            from ultralytics.utils import LOGGER
-            import logging
-            old_level = LOGGER.level
-            LOGGER.setLevel(logging.ERROR)
-            
             results_teacher = teacher_model.predict(fused_tensor, verbose=False)
-            
-            LOGGER.setLevel(old_level)
-            
             results_teacher[0].orig_img = display_canvas.copy()
             img_teacher = results_teacher[0].plot()
             img_teacher = add_title_to_image(img_teacher, "Teacher (Fusion)")

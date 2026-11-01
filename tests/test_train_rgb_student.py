@@ -1,22 +1,22 @@
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 import torch
 from torch.utils.data import RandomSampler, SequentialSampler
 
-from dataset_loader import limit_dataset, yolo_collate_fn
-from utils import DSEC_NAMES, build_model, set_loss_schedule
-from dataset_loader import create_rgb_dataloaders
-from evaluate import validate_model
+from loaders.dataset_loader import limit_dataset, yolo_collate_fn
+from utils.model import DSEC_NAMES, build_model, set_loss_schedule
+from loaders.dataset_loader import create_rgb_dataloaders
+from degradation.conditions import DEFAULT_AUGMENTATION_SEED, DEFAULT_STRENGTH_RANGE
+from evaluation.metrics import validate_model
 from ultralytics.optim import MuSGD
-from utils import (
+from utils.model import (
     OPTIMISER_LR,
     create_optimiser,
     extract_trainable_model,
-    fetch_best_dict,
+    best_checkpoint_map50_95,
     load_checkpoint,
     select_device,
 )
@@ -50,12 +50,12 @@ def group_named(optimiser, name):
 
 class TrainRgbStudentTests(unittest.TestCase):
     def test_select_device(self):
-        with patch("utils.torch.cuda.is_available", return_value=True):
+        with patch("utils.model.torch.cuda.is_available", return_value=True):
             self.assertEqual(select_device().type, "cuda")
-        with patch("utils.torch.cuda.is_available", return_value=False):
+        with patch("utils.model.torch.cuda.is_available", return_value=False):
             self.assertEqual(select_device().type, "cpu")
 
-    @patch("dataset_loader.DSECFusionDataset")
+    @patch("loaders.dataset_loader.DSECFusionDataset")
     def test_dataloader_configuration(self, dataset_class):
         dataset_class.side_effect = [[None] * 8, [None] * 2]
         logger = MagicMock()
@@ -89,6 +89,12 @@ class TrainRgbStudentTests(unittest.TestCase):
                     split="train",
                     rgb_only=True,
                     augment=False,
+                    with_event_window=False,
+                    rgb_dropout=0.0,
+                    augmentation_shares=None,
+                    dark_strength_range=DEFAULT_STRENGTH_RANGE,
+                    overexposed_strength_range=DEFAULT_STRENGTH_RANGE,
+                    augmentation_seed=DEFAULT_AUGMENTATION_SEED,
                 ),
                 call(
                     dataset_path=Path("fake-dataset"),
@@ -116,33 +122,24 @@ class TrainRgbStudentTests(unittest.TestCase):
                 create_rgb_dataloaders(Path("fake"), logger=logger, **kwargs)
         self.assertEqual(logger.error.call_count, 3)
 
-    @patch("utils.build_model")
+    @patch("utils.model.build_model")
     def test_extract_trainable_model(self, mock_build_model):
-        model = MagicMock(spec=torch.nn.Module)
-        parameters = [
-            torch.nn.Parameter(torch.tensor([1.0]), requires_grad=False),
-            torch.nn.Parameter(torch.tensor([2.0]), requires_grad=False),
-        ]
-        model.parameters.return_value = parameters
-        model.modules.return_value = []
-        model.to.return_value = model
+        model = torch.nn.Linear(2, 2).eval()
         mock_build_model.return_value = model
 
         result = extract_trainable_model(
             ch=3,
             weights_path="dummy.pt",
             device=torch.device("cpu"),
+            epochs=50,
         )
 
         mock_build_model.assert_called_once_with(3, "dummy.pt")
-        model.train.assert_called_once()
-        model.to.assert_called_once_with(torch.device("cpu"))
-        self.assertTrue(all(parameter.requires_grad for parameter in parameters))
-        self.assertIsInstance(result.args, SimpleNamespace)
-        self.assertEqual(result.args.box, 7.5)
-        self.assertEqual(result.args.cls, 0.5)
-        self.assertEqual(result.args.dfl, 1.5)
-        self.assertEqual(result.args.device, "cpu")
+        self.assertIs(result, model)
+        self.assertTrue(result.training)
+        # Ultralytics' default loss gains, as its own trainer sets them, with the run's epochs
+        self.assertEqual((result.args.box, result.args.cls, result.args.dfl), (7.5, 0.5, 1.5))
+        self.assertEqual(result.args.epochs, 50)
 
     def test_build_model_matches_dsec_setup(self):
         for ch in (3, 5):
@@ -151,6 +148,21 @@ class TrainRgbStudentTests(unittest.TestCase):
                 self.assertEqual(model.model[0].conv.in_channels, ch)
                 self.assertEqual(model.model[-1].nc, 8)
                 self.assertEqual(model.names, DSEC_NAMES)
+
+    def test_teacher_starts_as_the_pretrained_rgb_detector(self):
+        student = build_model(ch=3, weights_path="yolo26n.pt").eval()
+        teacher = build_model(ch=5, weights_path="yolo26n.pt").eval()
+        rgb, events = torch.rand(2, 3, 32, 32), torch.rand(2, 2, 32, 32)
+        with torch.no_grad():
+            # Event filters start at zero, so the first layer sees only the pretrained RGB filters
+            torch.testing.assert_close(
+                teacher.model[0](torch.cat((rgb, events), dim=1)), student.model[0](rgb), rtol=0, atol=0
+            )
+        self.assertTrue(teacher.model[0].conv.weight[:, 3:].eq(0).all())
+        teacher.train()
+        teacher.model[0](torch.cat((rgb, events), dim=1)).sum().backward()
+        # ...but they still learn: the events reach them through the gradient
+        self.assertGreater(teacher.model[0].conv.weight.grad[:, 3:].abs().sum(), 0)
 
     def test_optimiser_configuration(self):
         model = build_model(ch=3)
@@ -198,76 +210,55 @@ class TrainRgbStudentTests(unittest.TestCase):
         # Weight decay scales with the images per step: 6 images x 11 batches against 64
         self.assertAlmostEqual(group_named(optimiser, "muon")["weight_decay"], 0.0005 * 66 / 64)
 
-    def test_checkpoint_loads_epoch_model_and_optimiser(self):
-        original_model = torch.nn.Linear(10, 2)
-        original_optimiser = torch.optim.AdamW(original_model.parameters(), lr=0.001)
-        loss = torch.nn.functional.mse_loss(
-            original_model(torch.randn(4, 10)), torch.randn(4, 2)
-        )
-        original_optimiser.zero_grad()
-        loss.backward()
-        original_optimiser.step()
+    def test_checkpoint_restores_model_optimiser_ema_and_schedule(self):
+        from torch.optim.lr_scheduler import LambdaLR
+        from ultralytics.utils.torch_utils import ModelEMA
 
+        def training_state():
+            model = torch.nn.Linear(10, 2)
+            optimiser = torch.optim.AdamW(model.parameters(), lr=0.001)
+            return model, optimiser, ModelEMA(model), LambdaLR(optimiser, lambda epoch: 0.5 ** epoch)
+
+        original_model, original_optimiser, original_ema, original_scheduler = training_state()
+        torch.nn.functional.mse_loss(original_model(torch.randn(4, 10)), torch.randn(4, 2)).backward()
+        original_optimiser.step()
+        original_ema.update(original_model)
+        original_scheduler.step()
         checkpoint = {
             "epoch": 5,
-            "model_state_dict": original_model.state_dict(),
+            "model_state_dict": original_ema.ema.state_dict(),
+            "raw_model_state_dict": original_model.state_dict(),
+            "ema_updates": original_ema.updates,
             "optimiser_state_dict": original_optimiser.state_dict(),
-            "val_loss": 0.42,
+            "scheduler_state_dict": original_scheduler.state_dict(),
         }
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "latest_student_yolo.pt"
             torch.save(checkpoint, path)
-            model = torch.nn.Linear(10, 2)
-            optimiser = torch.optim.AdamW(model.parameters(), lr=0.001)
-            loaded = load_checkpoint(path, torch.device("cpu"), model, optimiser)
+            model, optimiser, ema, scheduler = training_state()
+            loaded = load_checkpoint(path, torch.device("cpu"), model, optimiser, ema, scheduler)
 
-        self.assertEqual(loaded, {"past_epochs": 5, "latest_val_loss": 0.42})
+        self.assertEqual(loaded, 5)
         for original, restored in zip(original_model.parameters(), model.parameters()):
             self.assertTrue(torch.equal(original, restored))
-        self.assertEqual(
-            original_optimiser.state_dict()["param_groups"],
-            optimiser.state_dict()["param_groups"],
-        )
+        for original, restored in zip(original_ema.ema.parameters(), ema.ema.parameters()):
+            self.assertTrue(torch.equal(original, restored))
+        self.assertEqual(ema.updates, original_ema.updates)
+        self.assertEqual(optimiser.state_dict()["param_groups"], original_optimiser.state_dict()["param_groups"])
+        self.assertEqual(scheduler.last_epoch, 1)
 
-    def test_missing_checkpoint_returns_default_values(self):
+    def test_missing_checkpoint_starts_from_epoch_zero(self):
         model = torch.nn.Linear(10, 2)
         optimiser = torch.optim.AdamW(model.parameters(), lr=0.001)
-        result = load_checkpoint(
-            "this_file_does_not_exist.pt",
-            torch.device("cpu"),
-            model,
-            optimiser,
-        )
-        self.assertEqual(result, {"past_epochs": 0, "latest_val_loss": float("inf")})
+        result = load_checkpoint("this_file_does_not_exist.pt", torch.device("cpu"), model, optimiser, None, None)
+        self.assertEqual(result, 0)
 
-    def test_fetch_best_checkpoint_can_restore_state(self):
-        original_model = torch.nn.Linear(10, 2)
-        original_optimiser = torch.optim.AdamW(original_model.parameters(), lr=0.001)
+    def test_best_checkpoint_map_is_read_or_minus_infinity_before_one_exists(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "best_student_yolo.pt"
-            torch.save(
-                {
-                    "model_state_dict": original_model.state_dict(),
-                    "optimiser_state_dict": original_optimiser.state_dict(),
-                    "epoch": 3,
-                    "val_loss": 0.25,
-                    "val_metrics": {"map50_95": 0.4},
-                },
-                path,
-            )
-            model = torch.nn.Linear(10, 2)
-            optimiser = torch.optim.AdamW(model.parameters(), lr=0.001)
-            result = fetch_best_dict(
-                path,
-                torch.device("cpu"),
-                model,
-                optimiser,
-                mode=1,
-            )
-
-        self.assertEqual(result, {"best_epoch": 3, "best_map50_95": 0.4})
-        for original, restored in zip(original_model.parameters(), model.parameters()):
-            self.assertTrue(torch.equal(original, restored))
+            self.assertEqual(best_checkpoint_map50_95(path, torch.device("cpu")), float("-inf"))
+            torch.save({"epoch": 3, "val_metrics": {"map50_95": 0.4}}, path)
+            self.assertEqual(best_checkpoint_map50_95(path, torch.device("cpu")), 0.4)
 
     def test_validation_uses_eval_mode_and_disables_gradients(self):
         model = MagicMock()
@@ -325,7 +316,7 @@ if __name__ == "__main__":
 class EpochResultsTests(unittest.TestCase):
     def test_results_csv_replaces_a_repeated_epoch_and_draws_the_curves(self):
         import csv
-        import log
+        from utils import log
 
         def row(epoch, loss):
             return {"epoch": epoch, "train/loss": loss, "val/loss": loss,
@@ -333,9 +324,9 @@ class EpochResultsTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             for epoch, loss in ((1, 3.0), (2, 2.0), (3, 1.5)):
-                log.log_epoch_results(row(epoch, loss), Path(directory))
+                log.log_epoch_results(row(epoch, loss), Path(directory), MagicMock())
             # A resumed run repeats epoch 3 after an interruption
-            log.log_epoch_results(row(3, 1.0), Path(directory))
+            log.log_epoch_results(row(3, 1.0), Path(directory), MagicMock())
 
             with open(Path(directory) / "results.csv", newline="") as file:
                 saved = list(csv.DictReader(file))
@@ -343,10 +334,37 @@ class EpochResultsTests(unittest.TestCase):
             self.assertEqual(float(saved[-1]["train/loss"]), 1.0)
             self.assertTrue((Path(directory) / "results.png").is_file())
 
+    def test_a_distillation_run_draws_its_curves(self):
+        from training.reporting import results_row
+        from utils import log
+
+        val = {"loss": 2.0, "box_loss": 1.0, "cls_loss": 1.0, "l1_loss": 0.0,
+               "precision": 0.5, "recall": 0.4, "map50": 0.4, "map50_95": 0.25}
+        weights = {"mean": 0.5, "min": 0.0, "max": 1.0, "zero_fraction": 0.1}
+        with tempfile.TemporaryDirectory() as directory, \
+                patch("ultralytics.utils.plotting.LOGGER") as ultralytics_logger:
+            for epoch in (1, 2):
+                train = {"loss": 3.0 / epoch, "box_loss": 1.5, "cls_loss": 1.5, "l1_loss": 0.0, "distill_loss": 0.06}
+                log.log_epoch_results(results_row(epoch, train, val, weights, 0.01), Path(directory), MagicMock())
+            self.assertTrue((Path(directory) / "results.png").is_file())
+        ultralytics_logger.error.assert_not_called()
+
+    def test_a_plot_that_cannot_be_saved_does_not_stop_training(self):
+        # Windows refuses to overwrite results.png while it is open in a viewer
+        import csv
+        from utils import log
+
+        logger = MagicMock()
+        with tempfile.TemporaryDirectory() as directory,                 patch("utils.log.plot_results", side_effect=OSError(22, "Invalid argument")):
+            log.log_epoch_results({"epoch": 1, "train/loss": 2.0}, Path(directory), logger)
+            with open(Path(directory) / "results.csv", newline="") as file:
+                self.assertEqual(len(list(csv.DictReader(file))), 1)
+        logger.warning.assert_called_once()
+
 
 class LoadWeightsTests(unittest.TestCase):
     def test_loads_training_checkpoints_and_bare_state_dicts(self):
-        from utils import load_weights
+        from utils.model import load_weights
 
         trained = torch.nn.Linear(3, 2)
         with tempfile.TemporaryDirectory() as directory:
@@ -359,7 +377,7 @@ class LoadWeightsTests(unittest.TestCase):
                     self.assertTrue(torch.equal(model.weight, trained.weight))
 
     def test_rejects_a_checkpoint_for_another_architecture(self):
-        from utils import load_weights
+        from utils.model import load_weights
 
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "other.pt"

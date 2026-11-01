@@ -1,4 +1,4 @@
-"""Generate minimal/mild/medium/strong RGB examples and descriptive pixel statistics.
+"""Generate clean/mild/strong darkened RGB examples and descriptive pixel statistics.
 
 This utility does not judge acceptance criteria or enforce saturation targets.
 """
@@ -14,7 +14,8 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import darkening
+from degradation import darkening
+from degradation.strength import STRENGTH_LEVELS
 
 def parse_args():
     parser = argparse.ArgumentParser(description = 'Generate a synthetic low-light image.')
@@ -44,19 +45,16 @@ def main():
         raise ValueError("Input must be an 8-bit image with three colour channels")
     rgb_input = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
-    strengths = {1: 1} | darkening.STRENGTH_RANGES
-    variants = {}
-    for level in strengths:
-        variants[level] = darkening.darken(rgb_input, level, seed = args.seed)
+    levels = {"clean": 0.0, **STRENGTH_LEVELS}
+    variants = {name: darkening.darken(rgb_input, strength, seed=args.seed) for name, strength in levels.items()}
 
     args.output_dir.mkdir(parents=True, exist_ok=False)
     panels = []
     stats = {}
 
-    for level in variants.keys():
-        lv = 'clean' if level == 1 else level
-        results_dict = dict(list(variants[level].items())[1:])
-        image = variants[level]['image']
+    for lv, result in variants.items():
+        results_dict = {key: value for key, value in result.items() if key != 'image'}
+        image = result['image']
         illum_factor = results_dict['global_illum_factor']
         mean_brightness = results_dict['mean_brightness']
         prop_dark = results_dict['proportion_dark']
@@ -84,7 +82,9 @@ def main():
         "image_sha256": hashlib.sha256(image_bytes).hexdigest(),
         "shape": list(rgb_input.shape),
         "module_sha256": hashlib.sha256(Path(darkening.__file__).read_bytes()).hexdigest(),
-        "strength_levels": darkening.STRENGTH_RANGES,
+        "strength_levels": levels,
+        "strong_illumination": darkening.STRONG_ILLUMINATION,
+        "illumination_variation": darkening.VARIATION,
         "fully_darkened_definition": "All three RGB channels equal 0; denominator is every pixel",
         "runtime": {"python": platform.python_version(), "numpy": np.__version__, "opencv": cv2.__version__},
         "stats": stats

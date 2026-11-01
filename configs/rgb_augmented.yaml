@@ -1,0 +1,11 @@
+# RGB student with matched degradation augmentation
+#   python train_rgb_student.py --config configs/rgb_augmented.yaml --dataset-path DATASET --num-workers N
+# Benchmark report name: rgb_augmented
+epochs: 25
+batch_size: 6
+seed: 0
+degradation_augmentation: true
+degradation_shares: [0.5, 0.25, 0.25]  # clean, dark, overexposed
+dark_strength_range: [0.35, 1.0]  # mild to strong
+overexposed_strength_range: [0.35, 1.0]
+augmentation_seed: 0

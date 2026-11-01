@@ -7,9 +7,9 @@ import torch
 import yaml
 from torch.utils.data import DataLoader, SequentialSampler
 
-from dataset_loader import yolo_collate_fn
-from dataset_loader import create_rgb_test_loader
-from evaluate import evaluate_test_model, format_results_table
+from loaders.dataset_loader import yolo_collate_fn
+from loaders.dataset_loader import create_rgb_test_loader
+from evaluation.metrics import evaluate_test_model, format_results_table
 from training import train_model
 import training
 
@@ -62,7 +62,6 @@ def val_results(loss, map50_95=0.0):
         "recall": 0.0,
         "map50": 0.0,
         "map50_95": map50_95,
-        "agnostic_map50": 0.0,
     }
 
 
@@ -103,11 +102,12 @@ class PostTrainingEvaluationTests(unittest.TestCase):
                 "model_state_dict": self.model.state_dict(),
                 "optimiser_state_dict": {},
                 "val_loss": 0.5,
+                "val_metrics": {"map50_95": 0.3},
             },
             self.checkpoint,
         )
 
-    @patch("dataset_loader.DSECFusionDataset")
+    @patch("loaders.dataset_loader.DSECFusionDataset")
     def test_test_loader_uses_test_split_sequential_order_and_keeps_last_batch(
         self, dataset_class
     ):
@@ -135,7 +135,7 @@ class PostTrainingEvaluationTests(unittest.TestCase):
             [0, 1, 2, 3, 4],
         )
 
-    @patch("dataset_loader.DSECFusionDataset", return_value=make_samples())
+    @patch("loaders.dataset_loader.DSECFusionDataset", return_value=make_samples())
     def test_test_loader_worker_configuration(self, dataset_class):
         loader = create_rgb_test_loader(Path("fake"), logger=self.logger, num_workers=2)
         self.assertTrue(loader.persistent_workers)
@@ -148,7 +148,7 @@ class PostTrainingEvaluationTests(unittest.TestCase):
                 create_rgb_test_loader(Path("fake"), logger=self.logger, **kwargs)
         self.assertEqual(self.logger.error.call_count, 3)
 
-    @patch("dataset_loader.DSECFusionDataset", return_value=[])
+    @patch("loaders.dataset_loader.DSECFusionDataset", return_value=[])
     def test_empty_test_split_fails_clearly(self, dataset_class):
         with self.assertRaisesRegex(ValueError, "test split is empty"):
             create_rgb_test_loader(Path("fake"), logger=self.logger)
@@ -270,7 +270,7 @@ class PostTrainingEvaluationTests(unittest.TestCase):
         self.assertFalse(any(message.startswith("Test loss") for message in messages))
 
     def test_real_detector_reports_metrics_per_class_and_saves_plots(self):
-        from utils import extract_trainable_model
+        from utils.model import extract_trainable_model
 
         model = extract_trainable_model(ch=3, weights_path=None, device="cpu")
         torch.save({"model_state_dict": model.state_dict()}, self.checkpoint)
@@ -294,7 +294,6 @@ class PostTrainingEvaluationTests(unittest.TestCase):
             "recall",
             "map50",
             "map50_95",
-            "agnostic_map50",
         ):
             self.assertIn(key, results)
         rows = results["per_class"]
@@ -510,7 +509,7 @@ class PostTrainingEvaluationTests(unittest.TestCase):
             ) as self.create_log_directory,
             patch.object(training.run.log, "create_logger", return_value=logger),
             patch.object(training.run.log, "log_command") as self.log_command,
-            patch.object(training.run.log, "log_model_config"),
+            patch.object(training.run.log, "log_model_config") as self.log_model_config,
             patch(
                 "sys.argv",
                 argv or ["train_rgb_student.py", "--dataset-path", "fake", *extra_args],
@@ -533,6 +532,7 @@ class PostTrainingEvaluationTests(unittest.TestCase):
 
     def _save_original_command(self, *args, script="train_rgb_student.py"):
         (self.directory / "run_args.yaml").write_text(yaml.safe_dump([script, *args]))
+        (self.directory / "config.yaml").write_text(yaml.safe_dump({"Config File": "configs/rgb_baseline.yaml"}))
         (self.directory / "latest_student_yolo.pt").touch()
 
     def test_resume_continues_in_the_original_folder_with_its_settings(self):
@@ -547,6 +547,8 @@ class PostTrainingEvaluationTests(unittest.TestCase):
         self.assertEqual(self.calls["train"]["total_epochs"], 7)
         self.assertEqual(self.calls["model"]["epochs"], 7)
         self.assertEqual(self.calls["dataloaders"]["batch_size"], 2)
+        # The run still records the config file it was started from
+        self.assertEqual(self.log_model_config.call_args.args[0]["Config File"], "configs/rgb_baseline.yaml")
         self.assertEqual(self.calls["dataloaders"]["num_workers"], 3)  # allowed override
 
     def test_resume_without_a_latest_checkpoint_fails(self):
@@ -566,16 +568,6 @@ class PostTrainingEvaluationTests(unittest.TestCase):
         argv = ["train_rgb_student.py", "--resume", str(self.directory)]
         with patch("sys.argv", argv), self.assertRaises(SystemExit):
             training.parse_args("test")
-
-    def test_resume_reads_older_runs_from_run_command_txt(self):
-        (self.directory / "run_command.txt").write_text(
-            "train_rgb_student.py --dataset-path dataset --epochs 100 --batch-size 6 --num-workers 4"
-        )
-        with patch("sys.argv", ["train_rgb_student.py", "--resume", str(self.directory)]):
-            args = training.parse_args("test")
-        self.assertEqual(args.dataset_path, Path("dataset"))
-        self.assertEqual((args.epochs, args.batch_size, args.num_workers), (100, 6, 4))
-        self.assertEqual(args.resume, self.directory)
 
     def test_new_runs_need_a_dataset_path(self):
         with patch("sys.argv", ["train_rgb_student.py"]), self.assertRaises(SystemExit):
