@@ -252,7 +252,7 @@ The code uses the [DSEC-Detection](https://dsec.ifi.uzh.ch/dsec-detection/) data
 
 ### Downloading the dataset
 
-The `DSEC-det` clone from step 3 contains the official download scripts. Run all three from inside `DSEC-det/`, with an **absolute** path for `DSEC_ROOT`: the scripts `cd` into sub-folders, so a relative path puts files in the wrong place.
+The `DSEC-det` clone from step 3 contains the official download scripts. Run all three from inside `DSEC-det/`, with an **absolute** path for `DSEC_ROOT`: the scripts `cd` into sub-folders, so a relative path puts files in the wrong place. On Windows, use WSL or another Bash-compatible environment to run these scripts.
 
 ```bash
 cd DSEC-det
@@ -544,7 +544,7 @@ The test suite covers the project’s expected data-loading and training workflo
 
 ## Smoke checks and diagnostics
 
-The quickest end-to-end check is a one-epoch run on a few evenly spaced frames from each split. It takes seconds, even on a CPU:
+The quickest end-to-end check is a one-epoch run on a few evenly spaced frames from each split. Execution time depends on the available hardware:
 
 ```bash
 python train_rgb_student.py \
