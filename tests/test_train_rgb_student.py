@@ -362,6 +362,59 @@ class EpochResultsTests(unittest.TestCase):
         logger.warning.assert_called_once()
 
 
+class RunFolderAndLoggerTests(unittest.TestCase):
+    def setUp(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        self.directory = Path(temp_dir.name)
+
+    def test_run_folders_are_numbered_per_role_and_never_reused(self):
+        import os
+        from utils import log
+
+        # create_log_directory works under runs/ in the current directory
+        previous = os.getcwd()
+        os.chdir(self.directory)
+        self.addCleanup(os.chdir, previous)
+        (self.directory / "runs" / "student" / "exp_001").mkdir(parents=True)
+
+        first = log.create_log_directory("student")
+        second = log.create_log_directory("student")
+        teacher = log.create_log_directory("teacher")
+
+        self.assertEqual(first, Path("runs") / "student" / "exp_002")
+        self.assertEqual(second, Path("runs") / "student" / "exp_003")
+        self.assertEqual(teacher, Path("runs") / "teacher" / "exp_001")
+        for folder in (first, second, teacher):
+            self.assertTrue((self.directory / folder).is_dir())
+
+    def test_logger_writes_everything_to_train_log_and_filters_the_console(self):
+        import io
+        import logging
+        from utils import log
+
+        console = io.StringIO()
+        with patch("sys.stdout", console):
+            logger = log.create_logger("run-folder-test", self.directory, console_level="warning")
+            # Creating it again, as a resumed run does, replaces the handlers instead of doubling them
+            logger = log.create_logger("run-folder-test", self.directory, console_level="warning")
+        self.addCleanup(lambda: [handler.close() for handler in logger.handlers])
+
+        logger.debug("batch details")
+        logger.warning("plot not saved")
+        for handler in logger.handlers:
+            handler.flush()
+
+        self.assertEqual(len(logger.handlers), 2)
+        self.assertFalse(logger.propagate)
+        saved = (self.directory / "train.log").read_text()
+        self.assertIn("DEBUG batch details", saved)
+        self.assertIn("WARNING plot not saved", saved)
+        self.assertNotIn("batch details", console.getvalue())
+        self.assertIn("plot not saved", console.getvalue())
+        self.assertEqual(logger.handlers[1].level, logging.WARNING)
+
+
 class LoadWeightsTests(unittest.TestCase):
     def test_loads_training_checkpoints_and_bare_state_dicts(self):
         from utils.model import load_weights

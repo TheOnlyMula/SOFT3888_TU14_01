@@ -461,6 +461,70 @@ class PostTrainingEvaluationTests(unittest.TestCase):
             2.0,
         )
 
+    def test_invalid_validation_map_preserves_old_checkpoint(self):
+        loader = make_loader(4)
+        optimiser = torch.optim.SGD(self.model.parameters(), lr=0.1)
+        with patch(
+            "training.loop.validate_model",
+            return_value=val_results(1.0, map50_95=float("nan")),
+        ):
+            with self.assertRaisesRegex(ValueError, "validation mAP50-95"):
+                train_model(
+                    loader,
+                    loader,
+                    self.model,
+                    optimiser,
+                    self.device,
+                    self.logger,
+                    total_epochs=1,
+                    checkpoint_path=self.checkpoint,
+                    latest_path=self.latest,
+                )
+        self.assertEqual(
+            torch.load(self.checkpoint, weights_only=True)["model_state_dict"][
+                "weight"
+            ].item(),
+            2.0,
+        )
+
+    def test_non_finite_training_loss_stops_training(self):
+        loader = make_loader(4)
+        optimiser = torch.optim.SGD(self.model.parameters(), lr=0.1)
+        with torch.no_grad():
+            self.model.weight.fill_(float("nan"))
+        with self.assertRaisesRegex(ValueError, "Non-finite training loss"):
+            train_model(
+                loader,
+                loader,
+                self.model,
+                optimiser,
+                self.device,
+                self.logger,
+                total_epochs=1,
+                checkpoint_path=self.checkpoint,
+                latest_path=self.latest,
+            )
+        self.assertFalse(self.latest.exists())
+
+    def test_empty_loaders_are_rejected_before_training(self):
+        loader = make_loader(4)
+        empty = DataLoader([], batch_size=4, collate_fn=yolo_collate_fn)
+        optimiser = torch.optim.SGD(self.model.parameters(), lr=0.1)
+        for train_loader, val_loader in ((empty, loader), (loader, empty)):
+            with self.subTest(empty_train=train_loader is empty), \
+                    self.assertRaisesRegex(ValueError, "non-empty"):
+                train_model(
+                    train_loader,
+                    val_loader,
+                    self.model,
+                    optimiser,
+                    self.device,
+                    self.logger,
+                    total_epochs=1,
+                    checkpoint_path=self.checkpoint,
+                    latest_path=self.latest,
+                )
+
     def _run_main(self, *extra_args, role="student", rgb_only=True, argv=None):
         events = []
         self.calls = {}
