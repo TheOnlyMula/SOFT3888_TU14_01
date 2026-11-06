@@ -33,3 +33,15 @@ env/
 .DS_Store
 Thumbs.db
 
+
+# Test coverage
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Large media and archives (share via Drive / Releases instead)
+*.mp4
+*.rar
+*.zip
+reports/videos/
